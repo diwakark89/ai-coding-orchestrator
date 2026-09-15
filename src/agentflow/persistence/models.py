@@ -39,5 +39,45 @@ class RunRecord(BaseModel):
     project_id: str
     task: str
     status: str
+    state: str = "NEW"
     created_at: datetime
     updated_at: datetime
+
+
+class RunStateTransitionRecord(BaseModel):
+    """Database record of a single workflow state transition for a run."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    from_state: str | None
+    to_state: str
+    reason: str | None
+    created_at: datetime
+
+
+class AgentSessionRecord(BaseModel):
+    """Database record of an individual agent CLI session invoked during a run."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    stage: str
+    provider: str
+    model: str
+    cli_session_id: str | None
+    created_at: datetime
+
+
+class DecisionRecord(BaseModel):
+    """Database record of a user decision (question/answer) made during a run."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    run_id: str
+    question: str
+    answer: str
+    created_at: datetime

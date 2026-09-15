@@ -43,3 +43,15 @@ class ResponseParsingError(AdapterError):
 
 class StructuredParsingError(ResponseParsingError):
     """Raised when structured output (JSON / schema) parsing or extraction fails."""
+
+
+class WorkflowError(AgentFlowError):
+    """Base exception for all workflow orchestration errors."""
+
+
+class InvalidStateTransitionError(WorkflowError):
+    """Raised when a workflow attempts an illegal state transition."""
+
+
+class PlanningBlockedError(WorkflowError):
+    """Raised when interactive planning cannot proceed and the run must be marked BLOCKED."""

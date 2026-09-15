@@ -1,5 +1,6 @@
 """Command line interface for AgentFlow."""
 
+import asyncio
 from pathlib import Path
 from typing import Annotated
 
@@ -7,8 +8,9 @@ import typer
 
 from agentflow import __version__
 from agentflow.application import Application
-from agentflow.errors import ProjectNotFoundError
+from agentflow.errors import AgentFlowError, ProjectNotFoundError
 from agentflow.ui.console import console
+from agentflow.workflow.states import WorkflowState
 
 app = typer.Typer(
     name="agentflow",
@@ -96,6 +98,54 @@ def status_cmd(
     except ProjectNotFoundError as e:
         app_instance.ui.print_error(str(e))
         raise typer.Exit(code=1)
+
+
+@app.command(name="run")
+def run_cmd(
+    ctx: typer.Context,
+    task: Annotated[
+        str,
+        typer.Argument(help="Natural-language description of the requested change."),
+    ],
+    project: Annotated[
+        Path | None,
+        typer.Option(
+            "--project",
+            "-C",
+            help="Target project directory path (overrides auto-discovery).",
+        ),
+    ] = None,
+) -> None:
+    """Start an interactive planning run for a task (Phase 3: planning only, no code changes)."""
+    global_project = ctx.obj.get("project") if ctx.obj else None
+    target_project = project or global_project
+    app_instance = Application()
+
+    try:
+        outcome = asyncio.run(
+            app_instance.run_planning(task_description=task, project_path=target_project)
+        )
+    except AgentFlowError as e:
+        app_instance.ui.print_error(str(e))
+        raise typer.Exit(code=1) from e
+
+    if outcome.state == WorkflowState.TASK_CLASSIFIED:
+        app_instance.ui.print_success(
+            f"Run {outcome.run_id} reached TASK_CLASSIFIED.\n"
+            f"  Plan:        {outcome.plan_path}\n"
+            f"  TaskProfile: {outcome.task_profile_path}"
+        )
+        return
+
+    if outcome.state == WorkflowState.CANCELLED:
+        app_instance.ui.print_warning(f"Run {outcome.run_id} cancelled by user.")
+        raise typer.Exit(code=1)
+
+    detail = f": {outcome.blocker_reason}" if outcome.blocker_reason else ""
+    app_instance.ui.print_error(
+        f"Run {outcome.run_id} ended in state {outcome.state.value}{detail}"
+    )
+    raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

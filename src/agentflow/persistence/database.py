@@ -1,6 +1,7 @@
 """SQLite database manager and entity repositories."""
 
 import sqlite3
+import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -8,7 +9,14 @@ from pathlib import Path
 
 from agentflow.errors import PersistenceError
 from agentflow.persistence.migrations import apply_migrations
-from agentflow.persistence.models import ProjectRecord, RunRecord, RunStatus
+from agentflow.persistence.models import (
+    AgentSessionRecord,
+    DecisionRecord,
+    ProjectRecord,
+    RunRecord,
+    RunStateTransitionRecord,
+    RunStatus,
+)
 
 
 class DatabaseManager:
@@ -163,16 +171,17 @@ class DatabaseManager:
         project_id: str,
         task: str,
         status: str = RunStatus.PENDING.value,
+        state: str = "NEW",
     ) -> RunRecord:
         """Create a new run entity in the database."""
         now = datetime.now(timezone.utc).isoformat()
         with self.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO runs (id, project_id, task, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?);
+                INSERT INTO runs (id, project_id, task, status, state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
                 """,
-                (run_id, project_id, task, status, now, now),
+                (run_id, project_id, task, status, state, now, now),
             )
 
         return RunRecord(
@@ -180,6 +189,7 @@ class DatabaseManager:
             project_id=project_id,
             task=task,
             status=status,
+            state=state,
             created_at=datetime.fromisoformat(now),
             updated_at=datetime.fromisoformat(now),
         )
@@ -196,6 +206,7 @@ class DatabaseManager:
                 project_id=row["project_id"],
                 task=row["task"],
                 status=row["status"],
+                state=row["state"],
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
@@ -221,6 +232,7 @@ class DatabaseManager:
                         project_id=row["project_id"],
                         task=row["task"],
                         status=row["status"],
+                        state=row["state"],
                         created_at=datetime.fromisoformat(row["created_at"]),
                         updated_at=datetime.fromisoformat(row["updated_at"]),
                     )
@@ -246,6 +258,7 @@ class DatabaseManager:
                         project_id=row["project_id"],
                         task=row["task"],
                         status=row["status"],
+                        state=row["state"],
                         created_at=datetime.fromisoformat(row["created_at"]),
                         updated_at=datetime.fromisoformat(row["updated_at"]),
                     )
@@ -262,3 +275,155 @@ class DatabaseManager:
             )
             if cursor.rowcount == 0:
                 raise PersistenceError(f"Run with ID '{run_id}' not found.")
+
+    def update_run_state(self, run_id: str, to_state: str, reason: str | None = None) -> RunRecord:
+        """Persist a workflow-state transition for a run and record transition history."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            cursor = conn.execute("SELECT state FROM runs WHERE id = ?;", (run_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise PersistenceError(f"Run with ID '{run_id}' not found.")
+            from_state = row["state"]
+
+            conn.execute(
+                "UPDATE runs SET state = ?, updated_at = ? WHERE id = ?;",
+                (to_state, now, run_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO run_state_transitions (
+                    id, run_id, from_state, to_state, reason, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                (str(uuid.uuid4()), run_id, from_state, to_state, reason, now),
+            )
+
+            cursor = conn.execute("SELECT * FROM runs WHERE id = ?;", (run_id,))
+            updated_row = cursor.fetchone()
+
+        return RunRecord(
+            id=updated_row["id"],
+            project_id=updated_row["project_id"],
+            task=updated_row["task"],
+            status=updated_row["status"],
+            state=updated_row["state"],
+            created_at=datetime.fromisoformat(updated_row["created_at"]),
+            updated_at=datetime.fromisoformat(updated_row["updated_at"]),
+        )
+
+    def list_state_transitions(self, run_id: str) -> list[RunStateTransitionRecord]:
+        """List workflow-state transition history for a run in chronological order."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM run_state_transitions WHERE run_id = ? ORDER BY created_at ASC;",
+                (run_id,),
+            )
+            return [
+                RunStateTransitionRecord(
+                    id=row["id"],
+                    run_id=row["run_id"],
+                    from_state=row["from_state"],
+                    to_state=row["to_state"],
+                    reason=row["reason"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def record_agent_session(
+        self,
+        session_id: str,
+        run_id: str,
+        stage: str,
+        provider: str,
+        model: str,
+        cli_session_id: str | None = None,
+    ) -> AgentSessionRecord:
+        """Record an individual agent CLI session invoked during a run."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_sessions (
+                    id, run_id, stage, provider, model, cli_session_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                (session_id, run_id, stage, provider, model, cli_session_id, now),
+            )
+
+        return AgentSessionRecord(
+            id=session_id,
+            run_id=run_id,
+            stage=stage,
+            provider=provider,
+            model=model,
+            cli_session_id=cli_session_id,
+            created_at=datetime.fromisoformat(now),
+        )
+
+    def list_agent_sessions(self, run_id: str) -> list[AgentSessionRecord]:
+        """List agent CLI sessions recorded for a run in chronological order."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM agent_sessions WHERE run_id = ? ORDER BY created_at ASC;",
+                (run_id,),
+            )
+            return [
+                AgentSessionRecord(
+                    id=row["id"],
+                    run_id=row["run_id"],
+                    stage=row["stage"],
+                    provider=row["provider"],
+                    model=row["model"],
+                    cli_session_id=row["cli_session_id"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def record_decision(
+        self,
+        decision_id: str,
+        run_id: str,
+        question: str,
+        answer: str,
+    ) -> DecisionRecord:
+        """Record a user decision (question/answer) made during a run."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO decisions (id, run_id, question, answer, created_at)
+                VALUES (?, ?, ?, ?, ?);
+                """,
+                (decision_id, run_id, question, answer, now),
+            )
+
+        return DecisionRecord(
+            id=decision_id,
+            run_id=run_id,
+            question=question,
+            answer=answer,
+            created_at=datetime.fromisoformat(now),
+        )
+
+    def list_decisions(self, run_id: str) -> list[DecisionRecord]:
+        """List user decisions recorded for a run in chronological order."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM decisions WHERE run_id = ? ORDER BY created_at ASC;",
+                (run_id,),
+            )
+            return [
+                DecisionRecord(
+                    id=row["id"],
+                    run_id=row["run_id"],
+                    question=row["question"],
+                    answer=row["answer"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in cursor.fetchall()
+            ]

@@ -43,8 +43,54 @@ MIGRATION_001_INITIAL_SCHEMA = Migration(
     """,
 )
 
+MIGRATION_002_WORKFLOW_PLANNING = Migration(
+    version=2,
+    name="workflow_planning",
+    sql="""
+    ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'NEW';
+
+    CREATE TABLE IF NOT EXISTS run_state_transitions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_run_state_transitions_run_id
+        ON run_state_transitions(run_id);
+
+    CREATE TABLE IF NOT EXISTS agent_sessions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        cli_session_id TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_sessions_run_id ON agent_sessions(run_id);
+
+    CREATE TABLE IF NOT EXISTS decisions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_decisions_run_id ON decisions(run_id);
+    """,
+)
+
 MIGRATIONS: Sequence[Migration] = [
     MIGRATION_001_INITIAL_SCHEMA,
+    MIGRATION_002_WORKFLOW_PLANNING,
 ]
 
 

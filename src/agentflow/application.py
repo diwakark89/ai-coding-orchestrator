@@ -17,6 +17,7 @@ from agentflow.persistence.database import DatabaseManager
 from agentflow.process.executor import ProcessExecutor
 from agentflow.project.discovery import discover_project
 from agentflow.ui.console import CHECKMARK, CROSSMARK, WARNINGMARK, ConsoleUI
+from agentflow.workflow.planning import PlanningOutcome, PlanningWorkflow
 
 
 @dataclass
@@ -375,3 +376,16 @@ class Application:
             f"Project: {ctx.project_name} (ID: {ctx.project_id[:12]})\n"
             f"Active runs ({len(active_runs)}):\n{runs_summary}"
         )
+
+    async def run_planning(
+        self, task_description: str, project_path: Path | None = None
+    ) -> PlanningOutcome:
+        """Run interactive Claude-based planning for a task through TaskProfile generation."""
+        self.initialize()
+        ctx = discover_project(explicit_path=project_path)
+        workflow = PlanningWorkflow(
+            db_manager=self.db_manager,
+            agent_registry=self.agent_registry,
+            console_ui=self.ui,
+        )
+        return await workflow.run(task_description, ctx)

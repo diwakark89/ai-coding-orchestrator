@@ -578,7 +578,7 @@ The application can invoke all three provider CLIs through the same internal int
 
 ---
 
-# Phase 3 — Interactive Planning Workflow
+# Phase 3 — Interactive Planning Workflow [DONE]
 
 ## Objective
 
@@ -2233,7 +2233,7 @@ Phase 2 [DONE]
 
 
 Milestone 3
-Phase 3
+Phase 3 [DONE]
 
 Milestone 4
 Phase 4

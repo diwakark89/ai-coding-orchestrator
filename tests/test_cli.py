@@ -5,7 +5,10 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from agentflow import __version__
+from agentflow.application import Application
 from agentflow.cli import app
+from agentflow.workflow.planning import PlanningOutcome
+from agentflow.workflow.states import WorkflowState
 
 runner = CliRunner()
 
@@ -86,3 +89,52 @@ def test_cli_doctor_nonexistent_project_fails(tmp_path: Path):
     result = runner.invoke(app, ["-C", str(missing), "doctor"])
     assert result.exit_code == 1
     assert "Critical environment requirements are missing" in result.output
+
+
+def test_cli_run_reports_task_classified(monkeypatch):
+    """agentflow run prints artifact paths and exits 0 when planning reaches TASK_CLASSIFIED."""
+
+    async def fake_run_planning(self, task_description, project_path=None):
+        return PlanningOutcome(
+            run_id="RUN-TEST01",
+            state=WorkflowState.TASK_CLASSIFIED,
+            plan_path=Path("approved-plan.md"),
+            task_profile_path=Path("task-profile.json"),
+        )
+
+    monkeypatch.setattr(Application, "run_planning", fake_run_planning)
+    result = runner.invoke(app, ["run", "Add a health check endpoint"])
+
+    assert result.exit_code == 0
+    assert "RUN-TEST01" in result.output
+    assert "TASK_CLASSIFIED" in result.output
+
+
+def test_cli_run_blocked_exits_nonzero(monkeypatch):
+    """agentflow run exits with code 1 and surfaces the blocker reason when planning is blocked."""
+
+    async def fake_run_planning(self, task_description, project_path=None):
+        return PlanningOutcome(
+            run_id="RUN-TEST02",
+            state=WorkflowState.BLOCKED,
+            blocker_reason="Planner CLI not authenticated.",
+        )
+
+    monkeypatch.setattr(Application, "run_planning", fake_run_planning)
+    result = runner.invoke(app, ["run", "Do something impossible"])
+
+    assert result.exit_code == 1
+    assert "not authenticated" in result.output
+
+
+def test_cli_run_cancelled_exits_nonzero(monkeypatch):
+    """agentflow run exits with code 1 when the user cancels plan approval."""
+
+    async def fake_run_planning(self, task_description, project_path=None):
+        return PlanningOutcome(run_id="RUN-TEST03", state=WorkflowState.CANCELLED)
+
+    monkeypatch.setattr(Application, "run_planning", fake_run_planning)
+    result = runner.invoke(app, ["run", "Add a feature"])
+
+    assert result.exit_code == 1
+    assert "cancelled" in result.output.lower()

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from agentflow.errors import PersistenceError
 from agentflow.persistence.database import DatabaseManager
+from agentflow.persistence.migrations import MIGRATIONS
 from agentflow.persistence.models import RunStatus
 
 
@@ -36,7 +38,7 @@ def test_migrations_idempotency(tmp_path: Path):
     with mgr.connection() as conn:
         cursor = conn.execute("SELECT count(*) FROM schema_migrations;")
         count = cursor.fetchone()[0]
-        assert count == 1
+        assert count == len(MIGRATIONS)
 
 
 def test_project_crud(tmp_path: Path):
@@ -155,6 +157,89 @@ def test_upsert_project_coalesce_preserves_values_in_return_model(tmp_path: Path
     assert fetched is not None
     assert fetched.name == "Original Name"
     assert fetched.config_hash == "initial_hash"
+
+
+def test_run_created_with_new_workflow_state(tmp_path: Path):
+    """A newly created run defaults to workflow state NEW."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+
+    run = mgr.create_run(run_id="run_state_1", project_id="proj_1", task="Do a thing")
+    assert run.state == "NEW"
+
+    fetched = mgr.get_run("run_state_1")
+    assert fetched is not None
+    assert fetched.state == "NEW"
+
+
+def test_update_run_state_persists_transition_history(tmp_path: Path):
+    """update_run_state updates the run's current state and records transition history."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_state_2", project_id="proj_1", task="Do a thing")
+
+    updated = mgr.update_run_state("run_state_2", "PROJECT_READY", reason="Project discovered")
+    assert updated.state == "PROJECT_READY"
+
+    updated = mgr.update_run_state("run_state_2", "PLANNING", reason="Planning started")
+    assert updated.state == "PLANNING"
+
+    transitions = mgr.list_state_transitions("run_state_2")
+    assert [t.to_state for t in transitions] == ["PROJECT_READY", "PLANNING"]
+    assert transitions[0].from_state == "NEW"
+    assert transitions[1].from_state == "PROJECT_READY"
+    assert transitions[1].reason == "Planning started"
+
+
+def test_update_run_state_missing_run_raises(tmp_path: Path):
+    """update_run_state raises PersistenceError for an unknown run ID."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+
+    with pytest.raises(PersistenceError):
+        mgr.update_run_state("does_not_exist", "PLANNING")
+
+
+def test_record_and_list_agent_sessions(tmp_path: Path):
+    """Agent sessions can be recorded and listed chronologically for a run."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_sessions", project_id="proj_1", task="Do a thing")
+
+    mgr.record_agent_session(
+        "sess_1", "run_sessions", "PLANNING", "anthropic", "Claude Sonnet 5", "cli-session-abc"
+    )
+    mgr.record_agent_session(
+        "sess_2", "run_sessions", "PLANNING", "anthropic", "Claude Opus 5", None
+    )
+
+    sessions = mgr.list_agent_sessions("run_sessions")
+    assert [s.id for s in sessions] == ["sess_1", "sess_2"]
+    assert sessions[0].cli_session_id == "cli-session-abc"
+    assert sessions[1].cli_session_id is None
+
+
+def test_record_and_list_decisions(tmp_path: Path):
+    """User decisions (question/answer pairs) can be recorded and listed for a run."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_decisions", project_id="proj_1", task="Do a thing")
+
+    mgr.record_decision("dec_1", "run_decisions", "Use REST or GraphQL?", "REST")
+
+    decisions = mgr.list_decisions("run_decisions")
+    assert len(decisions) == 1
+    assert decisions[0].question == "Use REST or GraphQL?"
+    assert decisions[0].answer == "REST"
 
 
 def test_database_manager_in_memory():
