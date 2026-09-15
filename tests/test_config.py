@@ -169,6 +169,157 @@ cli:
     assert cfg.cli.claude.command == "claude-env"
 
 
+def test_load_project_config_with_full_routing_schema(tmp_path: Path):
+    """A routing.yaml with models/complexity/routing sections validates end to end."""
+    project_config_file = tmp_path / "routing.yaml"
+    project_config_file.write_text(
+        """
+version: 1
+
+project:
+  name: viteprep
+
+models:
+  planner:
+    default:
+      provider: anthropic
+      model: Claude Sonnet 5
+    architecture:
+      provider: anthropic
+      model: Claude Opus 5
+  implementation:
+    lightweight:
+      provider: openai
+      model: GPT-5.6 Luna
+    standard:
+      provider: openai
+      model: GPT-5.6 Terra
+    escalation:
+      provider: anthropic
+      model: Claude Sonnet 5
+  review:
+    default:
+      provider: google
+      model: Gemini 3.8 Flash
+    deep:
+      provider: anthropic
+      model: Claude Sonnet 5
+    architecture:
+      provider: anthropic
+      model: Claude Opus 5
+  documentation:
+    default:
+      provider: google
+      model: Gemini 3.8 Flash
+
+complexity:
+  file_count:
+    "1-3": 0
+    "4-7": 1
+    "8+": 2
+  flags:
+    payment: 3
+  thresholds:
+    low:
+      max: 2
+    medium:
+      min: 3
+      max: 5
+    high:
+      min: 6
+
+routing:
+  implementation:
+    force_standard_if_any:
+      - payment
+    rules:
+      - id: low-complexity
+        when:
+          complexity: low
+        use: implementation.lightweight
+      - id: medium-complexity
+        when:
+          complexity: medium
+        use: implementation.standard
+
+escalation:
+  implementation:
+    lightweight:
+      verification_failure_limit: 2
+      next: implementation.standard
+
+verification:
+  python:
+    detect:
+      - pyproject.toml
+    commands:
+      - pytest
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_project_config(project_config_file)
+    assert cfg.models is not None
+    assert cfg.models.implementation.lightweight.model == "GPT-5.6 Luna"
+    assert cfg.complexity is not None
+    assert cfg.complexity.flags["payment"] == 3
+    assert cfg.routing is not None
+    assert cfg.routing.implementation.rules[0].id == "low-complexity"
+    assert cfg.escalation is not None
+    assert cfg.verification is not None
+
+
+def test_load_project_config_rejects_undefined_model_alias(tmp_path: Path):
+    """A routing rule referencing a model alias absent from models: is rejected."""
+    project_config_file = tmp_path / "routing.yaml"
+    project_config_file.write_text(
+        """
+version: 1
+
+project:
+  name: broken-alias-project
+
+routing:
+  implementation:
+    rules:
+      - id: low-complexity
+        when:
+          complexity: low
+        use: implementation.does_not_exist
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="Undefined model alias"):
+        load_project_config(project_config_file)
+
+
+def test_load_project_config_routing_without_models_uses_v1_defaults(tmp_path: Path):
+    """A routing: section referencing only the standard V1 aliases needs no models: section."""
+    project_config_file = tmp_path / "routing.yaml"
+    project_config_file.write_text(
+        """
+version: 1
+
+project:
+  name: defaults-only-project
+
+routing:
+  implementation:
+    rules:
+      - id: low-complexity
+        when:
+          complexity: low
+        use: implementation.lightweight
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_project_config(project_config_file)
+    assert cfg.models is None
+    assert cfg.routing is not None
+
+
 def test_cli_commands_defaults_when_empty_dict_passed():
     """Verify that empty mapping for codex or gemini does not inadvertently default to claude."""
     cfg = GlobalConfig.model_validate(

@@ -5,10 +5,22 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from agentflow import __version__
-from agentflow.application import Application
+from agentflow.agents.base import Provider
+from agentflow.application import (
+    Application,
+    CleanupReport,
+    ImplementationRunOutcome,
+    PipelineOutcome,
+    RoutingOutcome,
+)
 from agentflow.cli import app
+from agentflow.observability.metrics import StatisticsReport
+from agentflow.routing.complexity import ComplexityLevel
+from agentflow.routing.decision import RoutingDecision
+from agentflow.task.profile import Stage
 from agentflow.workflow.planning import PlanningOutcome
 from agentflow.workflow.states import WorkflowState
+from agentflow.workflow.verification import VerificationResult, VerificationStatus
 
 runner = CliRunner()
 
@@ -40,6 +52,27 @@ def test_cli_status():
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "Status:" in result.output or "Active runs" in result.output
+
+
+def test_cli_stats_reports_local_metrics(monkeypatch):
+    """agentflow stats delegates to informational local reporting without changing routing."""
+    observed: dict[str, bool] = {}
+
+    def fake_get_statistics(self, project_path=None, show_all=False):
+        observed["show_all"] = show_all
+        return StatisticsReport(total_runs=0)
+
+    def fake_render_statistics(self, report):
+        self.ui.console.print(f"Stats: {report.total_runs}")
+
+    monkeypatch.setattr(Application, "get_statistics", fake_get_statistics)
+    monkeypatch.setattr(Application, "render_statistics", fake_render_statistics)
+
+    result = runner.invoke(app, ["stats", "--all"])
+
+    assert result.exit_code == 0
+    assert observed["show_all"]
+    assert "Stats: 0" in result.output
 
 
 def test_cli_with_explicit_project_flag(tmp_path: Path):
@@ -138,3 +171,257 @@ def test_cli_run_cancelled_exits_nonzero(monkeypatch):
 
     assert result.exit_code == 1
     assert "cancelled" in result.output.lower()
+
+
+def test_cli_route_displays_decision_and_exits_zero(monkeypatch):
+    """agentflow route prints the routing decision and exits 0 on success."""
+
+    async def fake_run_routing(self, task_description, project_path=None, user_override=None):
+        planning = PlanningOutcome(run_id="RUN-ROUTE01", state=WorkflowState.TASK_CLASSIFIED)
+        decision = RoutingDecision(
+            stage=Stage.IMPLEMENTATION,
+            provider=Provider.OPENAI,
+            model="GPT-5.6 Terra",
+            role="implementation.standard",
+            matched_rule="implementation.force-standard",
+            reason="Authorization requires the standard tier.",
+            complexity_score=2,
+            complexity=ComplexityLevel.LOW,
+            risk_flags=["authorization"],
+        )
+        return RoutingOutcome(
+            planning_outcome=planning,
+            decision=decision,
+            decision_path=Path("routing-decision.json"),
+        )
+
+    monkeypatch.setattr(Application, "run_routing", fake_run_routing)
+    result = runner.invoke(app, ["route", "Add a secured endpoint"])
+
+    assert result.exit_code == 0
+    assert "GPT-5.6 Terra" in result.output
+    assert "implementation.force-standard" in result.output
+
+
+def test_cli_route_blocked_exits_nonzero(monkeypatch):
+    """agentflow route exits 1 when planning does not reach TASK_CLASSIFIED."""
+
+    async def fake_run_routing(self, task_description, project_path=None, user_override=None):
+        planning = PlanningOutcome(
+            run_id="RUN-ROUTE02", state=WorkflowState.BLOCKED, blocker_reason="nope"
+        )
+        return RoutingOutcome(planning_outcome=planning)
+
+    monkeypatch.setattr(Application, "run_routing", fake_run_routing)
+    result = runner.invoke(app, ["route", "Do something impossible"])
+
+    assert result.exit_code == 1
+    assert "nope" in result.output
+
+
+def test_cli_route_requires_both_override_flags():
+    """agentflow route rejects a lone --override-model without --override-provider."""
+    result = runner.invoke(app, ["route", "Add a feature", "--override-model", "Claude Sonnet 5"])
+
+    assert result.exit_code == 1
+    assert "must both be provided" in result.output
+
+
+def test_cli_implement_reports_success(monkeypatch, tmp_path: Path):
+    """agentflow implement reports success and exits 0 when verification passes."""
+
+    async def fake_run_implementation(
+        self, task_description, project_path=None, user_override=None
+    ):
+        from agentflow.git.worktree import WorktreeHandle
+        from agentflow.workflow.implementation import ImplementationOutcome
+
+        planning = PlanningOutcome(run_id="RUN-IMPL01", state=WorkflowState.TASK_CLASSIFIED)
+        worktree = WorktreeHandle(
+            path=tmp_path / "worktree", branch_name="agentflow/RUN-IMPL01", repository_path=tmp_path
+        )
+        implementation = ImplementationOutcome(
+            run_id="RUN-IMPL01", state=WorkflowState.VERIFYING, worktree=worktree
+        )
+        verification = VerificationResult(
+            status=VerificationStatus.PASSED, groups_run=[], command_results=[]
+        )
+        return ImplementationRunOutcome(
+            planning_outcome=planning,
+            state=WorkflowState.VERIFYING,
+            implementation=implementation,
+            verification=verification,
+            verification_path=tmp_path / "verification.json",
+        )
+
+    monkeypatch.setattr(Application, "run_implementation", fake_run_implementation)
+    result = runner.invoke(app, ["implement", "Add a feature"])
+
+    assert result.exit_code == 0
+    assert "RUN-IMPL01" in result.output
+    assert "verified successfully" in result.output
+
+
+def test_cli_implement_blocked_exits_nonzero(monkeypatch):
+    """agentflow implement exits 1 and surfaces the reason when implementation is blocked."""
+
+    async def fake_run_implementation(
+        self, task_description, project_path=None, user_override=None
+    ):
+        planning = PlanningOutcome(run_id="RUN-IMPL02", state=WorkflowState.TASK_CLASSIFIED)
+        return ImplementationRunOutcome(
+            planning_outcome=planning,
+            state=WorkflowState.BLOCKED,
+            blocker_reason="Codex CLI not authenticated.",
+        )
+
+    monkeypatch.setattr(Application, "run_implementation", fake_run_implementation)
+    result = runner.invoke(app, ["implement", "Add a feature"])
+
+    assert result.exit_code == 1
+    assert "not authenticated" in result.output
+
+
+def test_cli_complete_reports_success(monkeypatch, tmp_path: Path):
+    """agentflow complete reports COMPLETED and exits 0 when the full pipeline succeeds."""
+
+    async def fake_run_pipeline(
+        self, task_description, project_path=None, user_override=None, final_approval_prompt=None
+    ):
+        planning = PlanningOutcome(run_id="RUN-COMPLETE01", state=WorkflowState.TASK_CLASSIFIED)
+        implementation_outcome = ImplementationRunOutcome(
+            planning_outcome=planning, state=WorkflowState.VERIFYING
+        )
+        return PipelineOutcome(
+            implementation_outcome=implementation_outcome,
+            state=WorkflowState.COMPLETED,
+            final_summary_path=tmp_path / "final-summary.md",
+        )
+
+    monkeypatch.setattr(Application, "run_pipeline", fake_run_pipeline)
+    result = runner.invoke(app, ["complete", "Add a feature"])
+
+    assert result.exit_code == 0
+    assert "RUN-COMPLETE01" in result.output
+    assert "COMPLETED" in result.output
+
+
+def test_cli_complete_blocked_exits_nonzero(monkeypatch):
+    """agentflow complete exits 1 and surfaces the reason when the pipeline is blocked."""
+
+    async def fake_run_pipeline(
+        self, task_description, project_path=None, user_override=None, final_approval_prompt=None
+    ):
+        planning = PlanningOutcome(run_id="RUN-COMPLETE02", state=WorkflowState.TASK_CLASSIFIED)
+        implementation_outcome = ImplementationRunOutcome(
+            planning_outcome=planning, state=WorkflowState.BLOCKED
+        )
+        return PipelineOutcome(
+            implementation_outcome=implementation_outcome,
+            state=WorkflowState.BLOCKED,
+            blocker_reason="Reviewer exited with code 1.",
+        )
+
+    monkeypatch.setattr(Application, "run_pipeline", fake_run_pipeline)
+    result = runner.invoke(app, ["complete", "Add a feature"])
+
+    assert result.exit_code == 1
+    assert "Reviewer exited" in result.output
+
+
+def test_cli_complete_cancelled_exits_nonzero(monkeypatch):
+    """agentflow complete exits 1 when the user cancels at final approval."""
+
+    async def fake_run_pipeline(
+        self, task_description, project_path=None, user_override=None, final_approval_prompt=None
+    ):
+        planning = PlanningOutcome(run_id="RUN-COMPLETE03", state=WorkflowState.TASK_CLASSIFIED)
+        implementation_outcome = ImplementationRunOutcome(
+            planning_outcome=planning, state=WorkflowState.VERIFYING
+        )
+        return PipelineOutcome(
+            implementation_outcome=implementation_outcome, state=WorkflowState.CANCELLED
+        )
+
+    monkeypatch.setattr(Application, "run_pipeline", fake_run_pipeline)
+    result = runner.invoke(app, ["complete", "Add a feature"])
+
+    assert result.exit_code == 1
+    assert "cancelled" in result.output.lower()
+
+
+def test_cli_resume_reports_completion(monkeypatch, tmp_path: Path):
+    """agentflow resume reports a recovered run's final summary when it completes."""
+
+    async def fake_run_resume(
+        self, run_id, project_path=None, user_override=None, final_approval_prompt=None
+    ):
+        planning = PlanningOutcome(run_id=run_id, state=WorkflowState.TASK_CLASSIFIED)
+        implementation_outcome = ImplementationRunOutcome(
+            planning_outcome=planning, state=WorkflowState.VERIFYING
+        )
+        return PipelineOutcome(
+            implementation_outcome=implementation_outcome,
+            state=WorkflowState.COMPLETED,
+            final_summary_path=tmp_path / "final-summary.md",
+        )
+
+    monkeypatch.setattr(Application, "run_resume", fake_run_resume)
+    result = runner.invoke(app, ["resume", "RUN-RESUME01"])
+
+    assert result.exit_code == 0
+    assert "RUN-RESUME01" in result.output
+    assert "COMPLETED" in result.output
+
+
+def test_cli_resume_errors_exit_nonzero(monkeypatch):
+    """agentflow resume surfaces recovery errors with a nonzero exit code."""
+
+    async def fake_run_resume(
+        self, run_id, project_path=None, user_override=None, final_approval_prompt=None
+    ):
+        from agentflow.errors import ResumeError
+
+        raise ResumeError("Run has no approved plan")
+
+    monkeypatch.setattr(Application, "run_resume", fake_run_resume)
+    result = runner.invoke(app, ["resume", "RUN-BAD"])
+
+    assert result.exit_code == 1
+    assert "no approved plan" in result.output
+
+
+def test_cli_runs_passes_all_and_limit_to_application(monkeypatch):
+    """agentflow runs forwards --all and --limit to the application renderer."""
+    received: dict[str, object] = {}
+
+    def fake_render_runs(self, project_path=None, limit=20, show_all=False):
+        received.update(project_path=project_path, limit=limit, show_all=show_all)
+
+    monkeypatch.setattr(Application, "render_runs", fake_render_runs)
+    result = runner.invoke(app, ["runs", "--all", "--limit", "7"])
+
+    assert result.exit_code == 0
+    assert received == {"project_path": None, "limit": 7, "show_all": True}
+
+
+def test_cli_cleanup_renders_report(monkeypatch):
+    """agentflow cleanup runs the async cleanup service and renders its result."""
+    received: dict[str, object] = {}
+
+    async def fake_run_cleanup(self, project_path=None):
+        received["project_path"] = project_path
+        return CleanupReport(worktrees_removed=["RUN-OLD"], locks_cleared=["run:RUN-OLD"])
+
+    def fake_render_cleanup_report(self, report):
+        received["report"] = report
+
+    monkeypatch.setattr(Application, "run_cleanup", fake_run_cleanup)
+    monkeypatch.setattr(Application, "render_cleanup_report", fake_render_cleanup_report)
+    result = runner.invoke(app, ["cleanup"])
+
+    assert result.exit_code == 0
+    assert received["project_path"] is None
+    report = received["report"]
+    assert isinstance(report, CleanupReport)
+    assert report.worktrees_removed == ["RUN-OLD"]

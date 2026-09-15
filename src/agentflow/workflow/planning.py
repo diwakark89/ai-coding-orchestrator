@@ -19,8 +19,9 @@ from agentflow.agents.base import AgentAdapter, AgentRequest, AgentResult, Agent
 from agentflow.agents.parser import parse_model_into_schema
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.errors import PlanningBlockedError, StructuredParsingError
+from agentflow.observability.events import record_agent_completed, record_agent_started
 from agentflow.persistence.database import DatabaseManager
-from agentflow.persistence.models import RunStatus
+from agentflow.persistence.models import DecisionRecord, RunStatus
 from agentflow.project.context import ProjectContext
 from agentflow.task.profile import TaskProfile
 from agentflow.ui.approval import ApprovalDecision, ask_plan_approval, ask_plan_feedback
@@ -170,6 +171,32 @@ def _build_feedback_prompt(feedback: str) -> str:
     )
 
 
+def _build_recovery_prompt(
+    task_description: str,
+    decisions: list[DecisionRecord],
+    continuing_session: bool,
+) -> str:
+    """Reconstruct enough planning context to recover after a local process crash."""
+    prior_decisions = (
+        "\n".join(f"- {decision.question}: {decision.answer}" for decision in decisions)
+        or "- (no prior answers or decisions were persisted)"
+    )
+    mode = (
+        "Continue the existing CLI session."
+        if continuing_session
+        else "The prior CLI session is unavailable; reconstruct the plan from this context."
+    )
+    return (
+        "AgentFlow's local process was interrupted while planning. "
+        f"{mode}\n\n"
+        f"Requested change:\n{task_description}\n\n"
+        f"Persisted planning decisions:\n{prior_decisions}\n\n"
+        "Inspect the repository again if needed. Continue with the next appropriate structured "
+        "planning response: questions, blocked, or plan_ready. Return only the required JSON "
+        "object; do not edit any files."
+    )
+
+
 def _build_retry_prompt(error: str) -> str:
     """Build a follow-up prompt asking the planner to correct malformed structured output."""
     return (
@@ -220,9 +247,14 @@ class PlanningWorkflow:
         """Default terminal prompt for plan revision feedback."""
         return ask_plan_feedback(self.ui.console)
 
-    async def run(self, task_description: str, project_context: ProjectContext) -> PlanningOutcome:
+    async def run(
+        self,
+        task_description: str,
+        project_context: ProjectContext,
+        run_id: str | None = None,
+    ) -> PlanningOutcome:
         """Execute planning end to end: create the run, plan interactively, and classify it."""
-        run_id = f"RUN-{uuid.uuid4().hex[:8].upper()}"
+        run_id = run_id or f"RUN-{uuid.uuid4().hex[:8].upper()}"
 
         self.db_manager.upsert_project(
             project_id=project_context.project_id,
@@ -246,18 +278,112 @@ class PlanningWorkflow:
                 run_id=run_id, state=WorkflowState.BLOCKED, blocker_reason=str(e)
             )
 
+    async def resume(
+        self,
+        run_id: str,
+        task_description: str,
+        project_context: ProjectContext,
+        current_state: WorkflowState,
+    ) -> PlanningOutcome:
+        """Resume an interrupted planning run from its persisted Claude session when possible.
+
+        If the prior CLI session is unavailable, reconstruct the conversation from the task and
+        persisted user decisions, then start a fresh planner session and record that recovery.
+        """
+        if current_state not in {
+            WorkflowState.PROJECT_READY,
+            WorkflowState.PLANNING,
+            WorkflowState.WAITING_FOR_USER,
+            WorkflowState.PLAN_READY,
+        }:
+            raise PlanningBlockedError(
+                f"Planning recovery is not valid from state {current_state.value}."
+            )
+
+        self._write_artifact(project_context, run_id, "task.md", f"# Task\n\n{task_description}\n")
+        if current_state != WorkflowState.PLANNING:
+            self._transition(run_id, WorkflowState.PLANNING, "Resuming interrupted planning")
+
+        adapter = self.agent_registry.get(Provider.ANTHROPIC)
+        prior_sessions = self.db_manager.list_agent_sessions(run_id)
+        prior_planner_sessions = [
+            session
+            for session in prior_sessions
+            if session.stage == WorkflowState.PLANNING.value and session.cli_session_id
+        ]
+        prior_session = prior_planner_sessions[-1] if prior_planner_sessions else None
+        session_id = (
+            prior_session.cli_session_id
+            if prior_session is not None and adapter.capabilities.supports_resume
+            else None
+        )
+        model = prior_session.model if prior_session is not None else SONNET_MODEL
+        role = AgentRole.ARCHITECTURE_PLANNER if model == OPUS_MODEL else AgentRole.DEFAULT_PLANNER
+        decisions = self.db_manager.list_decisions(run_id)
+        prompt = _build_recovery_prompt(task_description, decisions, session_id is not None)
+        recovery_kind = (
+            "resumed CLI session" if session_id else "reconstructed context in new CLI session"
+        )
+        self.db_manager.record_decision(
+            str(uuid.uuid4()), run_id, "planning_recovery", recovery_kind
+        )
+
+        try:
+            return await self._planning_loop(
+                run_id,
+                task_description,
+                project_context,
+                initial_prompt=prompt,
+                initial_session_id=session_id,
+                initial_model=model,
+                initial_role=role,
+            )
+        except PlanningBlockedError as error:
+            if session_id is None:
+                self._transition(run_id, WorkflowState.BLOCKED, str(error))
+                self.db_manager.update_run_status(run_id, RunStatus.BLOCKED.value)
+                return PlanningOutcome(
+                    run_id=run_id, state=WorkflowState.BLOCKED, blocker_reason=str(error)
+                )
+
+            self.db_manager.record_decision(
+                str(uuid.uuid4()),
+                run_id,
+                "planning_recovery",
+                "prior CLI session unavailable; reconstructing context in new session",
+            )
+            try:
+                return await self._planning_loop(
+                    run_id,
+                    task_description,
+                    project_context,
+                    initial_prompt=_build_recovery_prompt(task_description, decisions, False),
+                )
+            except PlanningBlockedError as fallback_error:
+                self._transition(run_id, WorkflowState.BLOCKED, str(fallback_error))
+                self.db_manager.update_run_status(run_id, RunStatus.BLOCKED.value)
+                return PlanningOutcome(
+                    run_id=run_id,
+                    state=WorkflowState.BLOCKED,
+                    blocker_reason=str(fallback_error),
+                )
+
     async def _planning_loop(
         self,
         run_id: str,
         task_description: str,
         project_context: ProjectContext,
+        initial_prompt: str | None = None,
+        initial_session_id: str | None = None,
+        initial_model: str = SONNET_MODEL,
+        initial_role: AgentRole = AgentRole.DEFAULT_PLANNER,
     ) -> PlanningOutcome:
         adapter = self.agent_registry.get(Provider.ANTHROPIC)
-        model = SONNET_MODEL
-        role: AgentRole = AgentRole.DEFAULT_PLANNER
-        session_id: str | None = None
-        escalated = False
-        prompt = _build_initial_prompt(task_description, project_context)
+        model = initial_model
+        role = initial_role
+        session_id = initial_session_id
+        escalated = model == OPUS_MODEL
+        prompt = initial_prompt or _build_initial_prompt(task_description, project_context)
 
         for _turn in range(self.max_turns):
             result = await self._invoke_planner(
@@ -383,6 +509,9 @@ class PlanningWorkflow:
             model=model,
             read_only=True,
         )
+        record_agent_started(
+            self.db_manager, run_id, WorkflowState.PLANNING.value, adapter.provider.value, model
+        )
         result = (
             await adapter.resume(session_id, request)
             if session_id
@@ -397,6 +526,7 @@ class PlanningWorkflow:
             model,
             result.session_id,
         )
+        record_agent_completed(self.db_manager, run_id, WorkflowState.PLANNING.value, result)
 
         if not result.success:
             detail = result.stderr.strip() or result.text.strip() or "no output"

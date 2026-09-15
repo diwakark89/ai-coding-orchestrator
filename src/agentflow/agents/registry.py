@@ -1,12 +1,20 @@
 """Adapter registry mapping providers to configured CLI adapters."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from agentflow.agents.base import AgentAdapter, Provider
 from agentflow.agents.claude import ClaudeAdapter
 from agentflow.agents.codex import CodexAdapter
 from agentflow.agents.gemini import GeminiAdapter
-from agentflow.config.models import GlobalConfig
 from agentflow.errors import AdapterNotFoundError
 from agentflow.process.executor import ProcessExecutor
+
+if TYPE_CHECKING:
+    # config.models imports routing, which imports agents.base -- importing GlobalConfig at
+    # runtime here would close that cycle back onto this module. Only needed for typing.
+    from agentflow.config.models import GlobalConfig
 
 
 class AgentAdapterRegistry:

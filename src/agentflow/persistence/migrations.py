@@ -88,9 +88,89 @@ MIGRATION_002_WORKFLOW_PLANNING = Migration(
     """,
 )
 
+MIGRATION_003_ROUTING_DECISIONS = Migration(
+    version=3,
+    name="routing_decisions",
+    sql="""
+    CREATE TABLE IF NOT EXISTS routing_decisions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        task_profile_json TEXT NOT NULL,
+        complexity_score INTEGER NOT NULL,
+        complexity_level TEXT NOT NULL,
+        matched_rule TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_routing_decisions_run_id ON routing_decisions(run_id);
+    """,
+)
+
+MIGRATION_004_IMPLEMENTATION_VERIFICATION = Migration(
+    version=4,
+    name="implementation_verification",
+    sql="""
+    CREATE TABLE IF NOT EXISTS stages (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stages_run_id ON stages(run_id);
+
+    CREATE TABLE IF NOT EXISTS verification_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        command TEXT NOT NULL,
+        exit_code INTEGER NOT NULL,
+        stdout_path TEXT,
+        stderr_path TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_verification_runs_run_id ON verification_runs(run_id);
+    """,
+)
+
+MIGRATION_005_LOCAL_OBSERVABILITY = Migration(
+    version=5,
+    name="local_observability",
+    sql="""
+    CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        stage TEXT,
+        event TEXT NOT NULL,
+        provider TEXT,
+        model TEXT,
+        attributes_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
+    CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
+    """,
+)
+
 MIGRATIONS: Sequence[Migration] = [
     MIGRATION_001_INITIAL_SCHEMA,
     MIGRATION_002_WORKFLOW_PLANNING,
+    MIGRATION_003_ROUTING_DECISIONS,
+    MIGRATION_004_IMPLEMENTATION_VERIFICATION,
+    MIGRATION_005_LOCAL_OBSERVABILITY,
 ]
 
 

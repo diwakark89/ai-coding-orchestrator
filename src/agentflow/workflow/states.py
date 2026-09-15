@@ -3,6 +3,7 @@
 from enum import Enum
 
 from agentflow.errors import InvalidStateTransitionError
+from agentflow.persistence.database import DatabaseManager
 
 
 class WorkflowState(str, Enum):
@@ -15,6 +16,19 @@ class WorkflowState(str, Enum):
     PLAN_READY = "PLAN_READY"
     PLAN_APPROVED = "PLAN_APPROVED"
     TASK_CLASSIFIED = "TASK_CLASSIFIED"
+
+    WORKTREE_READY = "WORKTREE_READY"
+    IMPLEMENTING = "IMPLEMENTING"
+    VERIFYING = "VERIFYING"
+    REPAIRING = "REPAIRING"
+
+    REVIEWING = "REVIEWING"
+    REVIEW_FIXING = "REVIEW_FIXING"
+    REVIEW_APPROVED = "REVIEW_APPROVED"
+
+    READY_FOR_APPROVAL = "READY_FOR_APPROVAL"
+    COMPLETED = "COMPLETED"
+
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -48,7 +62,49 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
         }
     ),
     WorkflowState.PLAN_APPROVED: frozenset({WorkflowState.TASK_CLASSIFIED, WorkflowState.FAILED}),
-    WorkflowState.TASK_CLASSIFIED: frozenset(),
+    WorkflowState.TASK_CLASSIFIED: frozenset(
+        {WorkflowState.WORKTREE_READY, WorkflowState.BLOCKED, WorkflowState.FAILED}
+    ),
+    WorkflowState.WORKTREE_READY: frozenset(
+        {WorkflowState.IMPLEMENTING, WorkflowState.BLOCKED, WorkflowState.FAILED}
+    ),
+    WorkflowState.IMPLEMENTING: frozenset(
+        {WorkflowState.VERIFYING, WorkflowState.BLOCKED, WorkflowState.FAILED}
+    ),
+    WorkflowState.VERIFYING: frozenset(
+        {
+            WorkflowState.REPAIRING,
+            WorkflowState.REVIEWING,
+            WorkflowState.BLOCKED,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.REPAIRING: frozenset(
+        {WorkflowState.VERIFYING, WorkflowState.BLOCKED, WorkflowState.FAILED}
+    ),
+    WorkflowState.REVIEWING: frozenset(
+        {
+            WorkflowState.REVIEW_FIXING,
+            WorkflowState.REVIEW_APPROVED,
+            WorkflowState.BLOCKED,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.REVIEW_FIXING: frozenset(
+        {WorkflowState.VERIFYING, WorkflowState.BLOCKED, WorkflowState.FAILED}
+    ),
+    WorkflowState.REVIEW_APPROVED: frozenset(
+        {WorkflowState.READY_FOR_APPROVAL, WorkflowState.BLOCKED, WorkflowState.FAILED}
+    ),
+    WorkflowState.READY_FOR_APPROVAL: frozenset(
+        {
+            WorkflowState.COMPLETED,
+            WorkflowState.CANCELLED,
+            WorkflowState.BLOCKED,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.COMPLETED: frozenset(),
     WorkflowState.BLOCKED: frozenset(),
     WorkflowState.FAILED: frozenset(),
     WorkflowState.CANCELLED: frozenset(),
@@ -61,3 +117,13 @@ def validate_transition(current: WorkflowState, target: WorkflowState) -> None:
         raise InvalidStateTransitionError(
             f"Invalid workflow state transition: {current.value} -> {target.value}"
         )
+
+
+def transition_run_state(
+    db_manager: DatabaseManager, run_id: str, to_state: WorkflowState, reason: str
+) -> None:
+    """Validate and persist a workflow state transition for a run."""
+    current_run = db_manager.get_run(run_id)
+    current_state = WorkflowState(current_run.state) if current_run else WorkflowState.NEW
+    validate_transition(current_state, to_state)
+    db_manager.update_run_state(run_id, to_state.value, reason)

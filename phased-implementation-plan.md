@@ -856,7 +856,7 @@ without editing repository code.
 
 ---
 
-# Phase 4 — Deterministic Routing Engine
+# Phase 4 — Deterministic Routing Engine [DONE]
 
 ## Objective
 
@@ -1180,7 +1180,7 @@ Identical RoutingDecision every time.
 
 ---
 
-# Phase 5 — Git Worktree and Implementation Workflow
+# Phase 5 — Git Worktree and Implementation Workflow [DONE]
 
 ## Objective
 
@@ -1341,7 +1341,7 @@ Run a trivial change using Luna and verify source changes appear only in the Age
 
 ---
 
-# Phase 6 — Deterministic Verification and Repair
+# Phase 6 — Deterministic Verification and Repair [DONE]
 
 ## Objective
 
@@ -1545,7 +1545,7 @@ Only process exit codes may do so.
 
 ---
 
-# Phase 7 — Independent Review and Fix Cycle
+# Phase 7 — Independent Review and Fix Cycle [DONE]
 
 ## Objective
 
@@ -1706,7 +1706,7 @@ Test:
 
 ---
 
-# Phase 8 — Documentation Workflow
+# Phase 8 — Documentation Workflow [DONE]
 
 ## Objective
 
@@ -1807,7 +1807,7 @@ Test:
 
 ---
 
-# Phase 9 — Final Approval and Run Completion
+# Phase 9 — Final Approval and Run Completion [DONE]
 
 ## Objective
 
@@ -1893,7 +1893,7 @@ only if:
 
 ---
 
-# Phase 10 — Resume, Crash Recovery, and Multi-Project Reliability
+# Phase 10 — Resume, Crash Recovery, and Multi-Project Reliability [DONE]
 
 ## Objective
 
@@ -2038,7 +2038,7 @@ Test:
 
 ---
 
-# Phase 11 — Observability and Routing Analytics
+# Phase 11 — Observability and Routing Analytics [DONE]
 
 ## Objective
 
@@ -2225,30 +2225,30 @@ Do not attempt the full orchestrator in one coding-agent task.
 Use these implementation milestones:
 
 ```text
-Milestone 1
-Phase 1 [DONE]
+Milestone 1 [DONE]
+Phase 1
 
-Milestone 2
-Phase 2 [DONE]
+Milestone 2 [DONE]
+Phase 2
 
 
-Milestone 3
-Phase 3 [DONE]
+Milestone 3 [DONE]
+Phase 3
 
-Milestone 4
+Milestone 4 [DONE]
 Phase 4
 
-Milestone 5
+Milestone 5 [DONE]
 Phases 5–6
 
-Milestone 6
+Milestone 6 [DONE]
 Phases 7–9
 
-Milestone 7
-Phase 10
+Milestone 7 [DONE]
+Phase 10 [DONE]
 
-Milestone 8
-Phase 11
+Milestone 8 [DONE]
+Phase 11 [DONE]
 ```
 
 **Phase 4 — deterministic routing — should be treated as a critical stability boundary.** Do not proceed to autonomous code implementation until its rule precedence, hard-risk overrides, complexity scoring, and reproducibility tests are all passing.

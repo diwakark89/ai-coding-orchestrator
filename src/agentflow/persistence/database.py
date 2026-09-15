@@ -1,8 +1,9 @@
 """SQLite database manager and entity repositories."""
 
+import json
 import sqlite3
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,10 +13,14 @@ from agentflow.persistence.migrations import apply_migrations
 from agentflow.persistence.models import (
     AgentSessionRecord,
     DecisionRecord,
+    EventRecord,
     ProjectRecord,
+    RoutingDecisionRecord,
     RunRecord,
     RunStateTransitionRecord,
     RunStatus,
+    StageRecord,
+    VerificationRunRecord,
 )
 
 
@@ -299,6 +304,22 @@ class DatabaseManager:
                 """,
                 (str(uuid.uuid4()), run_id, from_state, to_state, reason, now),
             )
+            conn.execute(
+                """
+                INSERT INTO events (
+                    id, run_id, stage, event, provider, model, attributes_json, created_at
+                )
+                VALUES (?, ?, ?, ?, NULL, NULL, ?, ?);
+                """,
+                (
+                    str(uuid.uuid4()),
+                    run_id,
+                    to_state,
+                    "STATE_TRANSITIONED",
+                    json.dumps({"from_state": from_state, "to_state": to_state}),
+                    now,
+                ),
+            )
 
             cursor = conn.execute("SELECT * FROM runs WHERE id = ?;", (run_id,))
             updated_row = cursor.fetchone()
@@ -427,3 +448,321 @@ class DatabaseManager:
                 )
                 for row in cursor.fetchall()
             ]
+
+    def record_routing_decision(
+        self,
+        decision_id: str,
+        run_id: str,
+        stage: str,
+        task_profile_json: str,
+        complexity_score: int,
+        complexity_level: str,
+        matched_rule: str,
+        provider: str,
+        model: str,
+        reason: str,
+    ) -> RoutingDecisionRecord:
+        """Persist a deterministic RoutingDecision for a run."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO routing_decisions (
+                    id, run_id, stage, task_profile_json, complexity_score, complexity_level,
+                    matched_rule, provider, model, reason, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    decision_id,
+                    run_id,
+                    stage,
+                    task_profile_json,
+                    complexity_score,
+                    complexity_level,
+                    matched_rule,
+                    provider,
+                    model,
+                    reason,
+                    now,
+                ),
+            )
+
+        record = RoutingDecisionRecord(
+            id=decision_id,
+            run_id=run_id,
+            stage=stage,
+            task_profile_json=task_profile_json,
+            complexity_score=complexity_score,
+            complexity_level=complexity_level,
+            matched_rule=matched_rule,
+            provider=provider,
+            model=model,
+            reason=reason,
+            created_at=datetime.fromisoformat(now),
+        )
+        self.record_event(
+            run_id=run_id,
+            stage=stage,
+            event="ROUTING_SELECTED",
+            provider=provider,
+            model=model,
+            attributes={
+                "matched_rule": matched_rule,
+                "complexity_score": complexity_score,
+                "complexity_level": complexity_level,
+            },
+        )
+        return record
+
+    def list_routing_decisions(self, run_id: str) -> list[RoutingDecisionRecord]:
+        """List routing decisions recorded for a run in chronological order."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM routing_decisions WHERE run_id = ? ORDER BY created_at ASC;",
+                (run_id,),
+            )
+            return [
+                RoutingDecisionRecord(
+                    id=row["id"],
+                    run_id=row["run_id"],
+                    stage=row["stage"],
+                    task_profile_json=row["task_profile_json"],
+                    complexity_score=row["complexity_score"],
+                    complexity_level=row["complexity_level"],
+                    matched_rule=row["matched_rule"],
+                    provider=row["provider"],
+                    model=row["model"],
+                    reason=row["reason"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def create_stage(
+        self,
+        stage_id: str,
+        run_id: str,
+        stage: str,
+        status: str = "IN_PROGRESS",
+        attempt_count: int = 0,
+    ) -> StageRecord:
+        """Create a stage-attempt tracking row for a run.
+
+        `stage` identifies the workflow stage, e.g. 'implementation' or 'repair.lightweight'.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO stages (
+                    id, run_id, stage, status, attempt_count, started_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL);
+                """,
+                (stage_id, run_id, stage, status, attempt_count, now),
+            )
+
+        return StageRecord(
+            id=stage_id,
+            run_id=run_id,
+            stage=stage,
+            status=status,
+            attempt_count=attempt_count,
+            started_at=datetime.fromisoformat(now),
+            completed_at=None,
+        )
+
+    def update_stage(
+        self,
+        stage_id: str,
+        status: str | None = None,
+        increment_attempt: bool = False,
+        completed: bool = False,
+    ) -> StageRecord:
+        """Update a stage's status and/or bump its attempt_count; optionally mark it completed."""
+        with self.connection() as conn:
+            cursor = conn.execute("SELECT * FROM stages WHERE id = ?;", (stage_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise PersistenceError(f"Stage with ID '{stage_id}' not found.")
+
+            new_status = status if status is not None else row["status"]
+            new_attempt_count = (
+                row["attempt_count"] + 1 if increment_attempt else row["attempt_count"]
+            )
+            new_completed_at = (
+                datetime.now(timezone.utc).isoformat() if completed else row["completed_at"]
+            )
+
+            conn.execute(
+                """
+                UPDATE stages SET status = ?, attempt_count = ?, completed_at = ? WHERE id = ?;
+                """,
+                (new_status, new_attempt_count, new_completed_at, stage_id),
+            )
+
+        return StageRecord(
+            id=row["id"],
+            run_id=row["run_id"],
+            stage=row["stage"],
+            status=new_status,
+            attempt_count=new_attempt_count,
+            started_at=datetime.fromisoformat(row["started_at"]),
+            completed_at=datetime.fromisoformat(new_completed_at) if new_completed_at else None,
+        )
+
+    def list_stages(self, run_id: str) -> list[StageRecord]:
+        """List stage-attempt tracking rows for a run in chronological order."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM stages WHERE run_id = ? ORDER BY started_at ASC;",
+                (run_id,),
+            )
+            return [
+                StageRecord(
+                    id=row["id"],
+                    run_id=row["run_id"],
+                    stage=row["stage"],
+                    status=row["status"],
+                    attempt_count=row["attempt_count"],
+                    started_at=datetime.fromisoformat(row["started_at"]),
+                    completed_at=(
+                        datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
+                    ),
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def record_verification_run(
+        self,
+        record_id: str,
+        run_id: str,
+        command: str,
+        exit_code: int,
+        started_at: datetime,
+        completed_at: datetime,
+        stdout_path: str | None = None,
+        stderr_path: str | None = None,
+    ) -> VerificationRunRecord:
+        """Persist a single verification command execution."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO verification_runs (
+                    id, run_id, command, exit_code, stdout_path, stderr_path,
+                    started_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    record_id,
+                    run_id,
+                    command,
+                    exit_code,
+                    stdout_path,
+                    stderr_path,
+                    started_at.isoformat(),
+                    completed_at.isoformat(),
+                ),
+            )
+
+        return VerificationRunRecord(
+            id=record_id,
+            run_id=run_id,
+            command=command,
+            exit_code=exit_code,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+
+    def list_verification_runs(self, run_id: str) -> list[VerificationRunRecord]:
+        """List verification command executions recorded for a run in chronological order."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM verification_runs WHERE run_id = ? ORDER BY started_at ASC;",
+                (run_id,),
+            )
+            return [
+                VerificationRunRecord(
+                    id=row["id"],
+                    run_id=row["run_id"],
+                    command=row["command"],
+                    exit_code=row["exit_code"],
+                    stdout_path=row["stdout_path"],
+                    stderr_path=row["stderr_path"],
+                    started_at=datetime.fromisoformat(row["started_at"]),
+                    completed_at=datetime.fromisoformat(row["completed_at"]),
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def record_event(
+        self,
+        run_id: str,
+        stage: str | None,
+        event: str,
+        provider: str | None = None,
+        model: str | None = None,
+        attributes: Mapping[str, str | int | float | bool] | None = None,
+    ) -> EventRecord:
+        """Persist a safe, structured local event without task text or agent output."""
+        now = datetime.now(timezone.utc).isoformat()
+        event_id = str(uuid.uuid4())
+        safe_attributes = dict(attributes or {})
+        attributes_json = json.dumps(safe_attributes, sort_keys=True)
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO events (
+                    id, run_id, stage, event, provider, model, attributes_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (event_id, run_id, stage, event, provider, model, attributes_json, now),
+            )
+        return EventRecord(
+            id=event_id,
+            run_id=run_id,
+            stage=stage,
+            event=event,
+            provider=provider,
+            model=model,
+            attributes=safe_attributes,
+            created_at=datetime.fromisoformat(now),
+        )
+
+    def list_events(self, run_id: str | None = None) -> list[EventRecord]:
+        """List local observability events chronologically, optionally for one run."""
+        query = "SELECT * FROM events " + ("WHERE run_id = ? " if run_id else "")
+        query += "ORDER BY created_at ASC;"
+        params: tuple[str, ...] = (run_id,) if run_id else ()
+        with self.connection() as conn:
+            cursor = conn.execute(query, params)
+            records: list[EventRecord] = []
+            for row in cursor.fetchall():
+                decoded = json.loads(row["attributes_json"])
+                attributes = (
+                    {
+                        str(key): value
+                        for key, value in decoded.items()
+                        if isinstance(value, str | int | float | bool)
+                    }
+                    if isinstance(decoded, dict)
+                    else {}
+                )
+                records.append(
+                    EventRecord(
+                        id=row["id"],
+                        run_id=row["run_id"],
+                        stage=row["stage"],
+                        event=row["event"],
+                        provider=row["provider"],
+                        model=row["model"],
+                        attributes=attributes,
+                        created_at=datetime.fromisoformat(row["created_at"]),
+                    )
+                )
+            return records

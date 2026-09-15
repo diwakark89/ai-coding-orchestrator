@@ -5,10 +5,14 @@ from agentflow.persistence.migrations import MIGRATIONS, Migration, apply_migrat
 from agentflow.persistence.models import (
     AgentSessionRecord,
     DecisionRecord,
+    EventRecord,
     ProjectRecord,
+    RoutingDecisionRecord,
     RunRecord,
     RunStateTransitionRecord,
     RunStatus,
+    StageRecord,
+    VerificationRunRecord,
 )
 
 __all__ = [
@@ -16,10 +20,14 @@ __all__ = [
     "AgentSessionRecord",
     "DatabaseManager",
     "DecisionRecord",
+    "EventRecord",
     "Migration",
     "ProjectRecord",
+    "RoutingDecisionRecord",
     "RunRecord",
     "RunStateTransitionRecord",
     "RunStatus",
+    "StageRecord",
+    "VerificationRunRecord",
     "apply_migrations",
 ]

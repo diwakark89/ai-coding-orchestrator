@@ -55,3 +55,31 @@ class InvalidStateTransitionError(WorkflowError):
 
 class PlanningBlockedError(WorkflowError):
     """Raised when interactive planning cannot proceed and the run must be marked BLOCKED."""
+
+
+class ImplementationBlockedError(WorkflowError):
+    """Raised when implementation cannot proceed and the run must be marked BLOCKED."""
+
+
+class ReviewBlockedError(WorkflowError):
+    """Raised when review cannot proceed or mandatory findings cannot be resolved."""
+
+
+class DocumentationBlockedError(WorkflowError):
+    """Raised when the documentation workflow cannot proceed."""
+
+
+class ResumeError(WorkflowError):
+    """Raised when a run cannot be safely resumed (terminal state, missing artifacts, etc.)."""
+
+
+class RunLockedError(WorkflowError):
+    """Raised when a run is already controlled by another live process."""
+
+
+class WorktreeError(AgentFlowError):
+    """Base exception for all Git worktree management errors."""
+
+
+class WorktreeLockedError(WorktreeError):
+    """Raised when a worktree is already locked by another writer."""

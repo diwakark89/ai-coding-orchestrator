@@ -1,9 +1,17 @@
 """Configuration data models for AgentFlow."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from agentflow.routing.complexity import ComplexityConfig
+from agentflow.routing.rules import (
+    DEFAULT_MODELS_CONFIG,
+    ModelsConfig,
+    RoutingRulesConfig,
+    all_referenced_aliases,
+)
 
 
 def _expand_path(v: Path | str) -> Path:
@@ -113,6 +121,33 @@ class ProjectMetaConfig(BaseModel):
     name: str
 
 
+class VerificationGroup(BaseModel):
+    """A named verification group: files whose presence enables it, and commands to run."""
+
+    model_config = ConfigDict(extra="ignore")
+    detect: list[str] = Field(default_factory=list)
+    commands: list[str] = Field(default_factory=list)
+
+
+class LimitsConfig(BaseModel):
+    """Bounded-retry limits preventing infinite agent loops (TDD §33)."""
+
+    model_config = ConfigDict(extra="ignore")
+    planning_turns: int = 20
+    implementation_attempts: int = 3
+    lightweight_verification_failures: int = 2
+    standard_failures: int = 2
+    review_fix_cycles: int = 2
+
+
+class DocumentationConfig(BaseModel):
+    """Project documentation update rules (routing.yaml `documentation:` section)."""
+
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool = True
+    candidate_files: list[str] = Field(default_factory=list)
+
+
 class ProjectConfig(BaseModel):
     """Project-level routing configuration (.ai-orchestrator/routing.yaml)."""
 
@@ -120,9 +155,31 @@ class ProjectConfig(BaseModel):
     version: int = 1
     project: ProjectMetaConfig
 
+    models: ModelsConfig | None = None
+    complexity: ComplexityConfig | None = None
+    routing: RoutingRulesConfig | None = None
+    verification: dict[str, VerificationGroup] | None = None
+    limits: LimitsConfig | None = None
+    documentation: DocumentationConfig | None = None
+
+    # The §23-style nested escalation graph (Phase 7+) has no dedicated schema yet;
+    # accepted here as opaque data so routing.yaml can declare it without being rejected.
+    escalation: dict[str, Any] | None = None
+
     @field_validator("version")
     @classmethod
     def _validate_version(cls, v: int) -> int:
         if v != 1:
             raise ValueError(f"Unsupported configuration version: {v}. Expected version 1.")
         return v
+
+    @model_validator(mode="after")
+    def _validate_routing_model_aliases(self) -> "ProjectConfig":
+        """Reject routing rules that reference an alias undefined in the models: section."""
+        if self.routing is None:
+            return self
+        # No models: section configured; fall back to V1 defaults for alias resolution.
+        models = self.models or DEFAULT_MODELS_CONFIG
+        for alias in all_referenced_aliases(self.routing):
+            models.resolve(alias)
+        return self

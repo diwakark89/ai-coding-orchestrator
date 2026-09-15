@@ -1,6 +1,7 @@
 """Unit tests for SQLite database persistence and schema migrations."""
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -240,6 +241,134 @@ def test_record_and_list_decisions(tmp_path: Path):
     assert len(decisions) == 1
     assert decisions[0].question == "Use REST or GraphQL?"
     assert decisions[0].answer == "REST"
+
+
+def test_record_and_list_routing_decisions(tmp_path: Path):
+    """Routing decisions can be recorded and listed chronologically for a run."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_routing", project_id="proj_1", task="Do a thing")
+
+    mgr.record_routing_decision(
+        "route_1",
+        "run_routing",
+        "IMPLEMENTATION",
+        '{"stage": "IMPLEMENTATION"}',
+        2,
+        "LOW",
+        "implementation.force-standard",
+        "openai",
+        "GPT-5.6 Terra",
+        "Authorization requires the standard tier.",
+    )
+
+    decisions = mgr.list_routing_decisions("run_routing")
+    assert len(decisions) == 1
+    assert decisions[0].model == "GPT-5.6 Terra"
+    assert decisions[0].matched_rule == "implementation.force-standard"
+
+
+def test_create_and_update_stage(tmp_path: Path):
+    """Stages track per-attempt status, incrementing attempt_count and marking completion."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_stage", project_id="proj_1", task="Do a thing")
+
+    stage = mgr.create_stage("stage_1", "run_stage", "implementation")
+    assert stage.status == "IN_PROGRESS"
+    assert stage.attempt_count == 0
+    assert stage.completed_at is None
+
+    updated = mgr.update_stage("stage_1", increment_attempt=True)
+    assert updated.attempt_count == 1
+
+    updated = mgr.update_stage("stage_1", status="FAILED", increment_attempt=True)
+    assert updated.attempt_count == 2
+    assert updated.status == "FAILED"
+
+    completed = mgr.update_stage("stage_1", status="PASSED", completed=True)
+    assert completed.status == "PASSED"
+    assert completed.completed_at is not None
+
+
+def test_update_stage_missing_raises(tmp_path: Path):
+    """update_stage raises PersistenceError for an unknown stage ID."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+
+    with pytest.raises(PersistenceError):
+        mgr.update_stage("does_not_exist", status="FAILED")
+
+
+def test_list_stages_chronological(tmp_path: Path):
+    """list_stages returns a run's stages in chronological order."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_stages", project_id="proj_1", task="Do a thing")
+
+    mgr.create_stage("stage_a", "run_stages", "implementation")
+    mgr.create_stage("stage_b", "run_stages", "repair.lightweight")
+
+    stages = mgr.list_stages("run_stages")
+    assert [s.id for s in stages] == ["stage_a", "stage_b"]
+
+
+def test_record_and_list_verification_runs(tmp_path: Path):
+    """Verification command executions can be recorded and listed chronologically."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_verify", project_id="proj_1", task="Do a thing")
+
+    now = datetime.now(timezone.utc)
+    mgr.record_verification_run(
+        "vr_1", "run_verify", "pytest", 0, now, now, stdout_path="/tmp/out.log"
+    )
+    mgr.record_verification_run("vr_2", "run_verify", "ruff check .", 1, now, now)
+
+    records = mgr.list_verification_runs("run_verify")
+    assert len(records) == 2
+    assert records[0].command == "pytest"
+    assert records[0].exit_code == 0
+    assert records[1].exit_code == 1
+    assert records[1].stdout_path is None
+
+
+def test_record_and_list_safe_observability_events(tmp_path: Path):
+    """Structured local events retain operational metadata without task or agent output."""
+    db_path = tmp_path / "test.db"
+    mgr = DatabaseManager(db_path)
+    mgr.initialize()
+    mgr.upsert_project("proj_1", "Project One", "/path/to/one")
+    mgr.create_run(run_id="run_events", project_id="proj_1", task="Do a thing")
+
+    event = mgr.record_event(
+        run_id="run_events",
+        stage="IMPLEMENTING",
+        event="AGENT_COMPLETED",
+        provider="openai",
+        model="GPT-5.6 Luna",
+        attributes={"exit_code": 0, "duration_seconds": 1.25, "timed_out": False},
+    )
+
+    assert event.attributes["exit_code"] == 0
+    events = mgr.list_events("run_events")
+    assert len(events) == 1
+    assert events[0].event == "AGENT_COMPLETED"
+    assert events[0].provider == "openai"
+    assert events[0].attributes == {
+        "duration_seconds": 1.25,
+        "exit_code": 0,
+        "timed_out": False,
+    }
 
 
 def test_database_manager_in_memory():
