@@ -633,3 +633,129 @@ async def test_adapter_timeout_preservation(tmp_path: Path, monkeypatch):
     assert result.timed_out is True
     assert result.success is False
     assert result.exit_code == -1
+
+
+@pytest.mark.asyncio
+async def test_claude_adapter_plain_text_with_regex_session_id(tmp_path: Path, monkeypatch):
+    """ClaudeAdapter extracts session ID via regex when output is plain text."""
+    plain_output = "Response generated.\nSession ID: claude-sess-9988-aabb\nDone."
+
+    async def mock_run(cmd_args, cwd=None, env=None, timeout=None, input_data=None):
+        return ProcessResult(
+            command=[str(a) for a in cmd_args],
+            exit_code=0,
+            stdout=plain_output,
+            stderr="",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            timed_out=False,
+        )
+
+    executor = ProcessExecutor()
+    monkeypatch.setattr(executor, "run", mock_run)
+
+    adapter = ClaudeAdapter(executor=executor)
+    req = AgentRequest(
+        role=AgentRole.DEFAULT_PLANNER,
+        prompt="Explain design",
+        repository_path=tmp_path,
+        model="sonnet",
+        extra_args=["--verbose"],
+    )
+    result = await adapter.start(req)
+
+    assert result.success is True
+    assert result.session_id == "claude-sess-9988-aabb"
+    assert "Response generated" in result.text
+
+
+@pytest.mark.asyncio
+async def test_codex_adapter_plain_text_output(tmp_path: Path, monkeypatch):
+    """CodexAdapter handles non-JSON plain text stdout cleanly."""
+    plain_output = "Build passed, no errors found."
+
+    async def mock_run(cmd_args, cwd=None, env=None, timeout=None, input_data=None):
+        return ProcessResult(
+            command=[str(a) for a in cmd_args],
+            exit_code=0,
+            stdout=plain_output,
+            stderr="",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            timed_out=False,
+        )
+
+    executor = ProcessExecutor()
+    monkeypatch.setattr(executor, "run", mock_run)
+
+    adapter = CodexAdapter(executor=executor)
+    req = AgentRequest(
+        role=AgentRole.LIGHTWEIGHT_CODER,
+        prompt="Check code",
+        repository_path=tmp_path,
+        model="gpt-5.6-luna",
+    )
+    result = await adapter.start(req)
+
+    assert result.success is True
+    assert result.text == plain_output
+    assert result.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_plain_text_regex_session_id(tmp_path: Path, monkeypatch):
+    """GeminiAdapter extracts session ID via regex when output is plain text."""
+    plain_output = "Review complete.\nsession: gemini-sess-5544-ccdd\nAll clear."
+
+    async def mock_run(cmd_args, cwd=None, env=None, timeout=None, input_data=None):
+        return ProcessResult(
+            command=[str(a) for a in cmd_args],
+            exit_code=0,
+            stdout=plain_output,
+            stderr="",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            timed_out=False,
+        )
+
+    executor = ProcessExecutor()
+    monkeypatch.setattr(executor, "run", mock_run)
+
+    adapter = GeminiAdapter(executor=executor)
+    req = AgentRequest(
+        role=AgentRole.DEFAULT_REVIEWER,
+        prompt="Review changes",
+        repository_path=tmp_path,
+        model="gemini-3.8-flash",
+    )
+    result = await adapter.start(req)
+
+    assert result.success is True
+    assert result.session_id == "gemini-sess-5544-ccdd"
+    assert "Review complete" in result.text
+
+
+def test_doctor_check_cli_version_failure(monkeypatch):
+    """Doctor check_cli marks check as warning when --version returns non-zero exit code."""
+    app = Application()
+
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/custom-cli")
+    monkeypatch.setattr(
+        app.executor,
+        "run_sync",
+        lambda *args, **kwargs: ProcessResult(
+            command=["custom-cli", "--version"],
+            exit_code=1,
+            stdout="",
+            stderr="Version flag not supported",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            timed_out=False,
+        ),
+    )
+
+    item = app.check_cli("Custom", "custom-cli")
+    assert item.passed is False
+    assert item.critical is False
+    assert item.is_warning is True
+    assert "failed '--version' check" in item.details

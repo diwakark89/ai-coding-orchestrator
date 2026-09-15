@@ -39,3 +39,7 @@ class CLIExecutionError(AdapterError):
 
 class ResponseParsingError(AdapterError):
     """Raised when provider CLI output cannot be parsed."""
+
+
+class StructuredParsingError(ResponseParsingError):
+    """Raised when structured output (JSON / schema) parsing or extraction fails."""

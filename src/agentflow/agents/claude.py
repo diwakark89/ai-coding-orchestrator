@@ -11,6 +11,7 @@ from agentflow.agents.base import (
     BaseAgentAdapter,
     Provider,
 )
+from agentflow.agents.parser import strip_markdown_fences
 from agentflow.process.executor import ProcessExecutor, ProcessResult
 
 CLAUDE_MODEL_ALIASES: dict[str, str] = {
@@ -112,32 +113,61 @@ class ClaudeAdapter(BaseAgentAdapter):
                     raw_events.extend(item for item in data if isinstance(item, dict))
                     extracted_text = raw_stdout
             except json.JSONDecodeError:
-                # Handle possible JSONL stream output
-                parsed_lines: list[dict[str, Any]] = []
-                text_parts: list[str] = []
-                for line in raw_stdout.splitlines():
-                    line_str = line.strip()
-                    if not line_str:
-                        continue
+                # Try stripping markdown code fences
+                fenced = strip_markdown_fences(raw_stdout, language="json")
+                if fenced != raw_stdout:
                     try:
-                        line_data = json.loads(line_str)
-                        if isinstance(line_data, dict):
-                            parsed_lines.append(line_data)
-                            if "result" in line_data:
-                                text_parts.append(str(line_data["result"]))
-                            elif "text" in line_data:
-                                text_parts.append(str(line_data["text"]))
-                            if "session_id" in line_data:
-                                extracted_session_id = str(line_data["session_id"])
-                            elif "sessionId" in line_data:
-                                extracted_session_id = str(line_data["sessionId"])
+                        fenced_data = json.loads(fenced)
+                        if isinstance(fenced_data, dict):
+                            raw_events.append(fenced_data)
+                            extracted_text = (
+                                fenced_data.get("result")
+                                or fenced_data.get("text")
+                                or fenced_data.get("content")
+                                or fenced_data.get("message")
+                                or fenced
+                            )
+                            extracted_session_id = (
+                                fenced_data.get("session_id")
+                                or fenced_data.get("sessionId")
+                                or (fenced_data.get("session") or {}).get("id")
+                                or extracted_session_id
+                            )
+                        elif isinstance(fenced_data, list):
+                            raw_events.extend(
+                                item for item in fenced_data if isinstance(item, dict)
+                            )
+                            extracted_text = fenced
                     except json.JSONDecodeError:
-                        continue
+                        pass
 
-                if parsed_lines:
-                    raw_events = parsed_lines
-                    if text_parts:
-                        extracted_text = "\n".join(text_parts)
+                if not raw_events:
+                    # Handle possible JSONL stream output
+                    parsed_lines: list[dict[str, Any]] = []
+                    text_parts: list[str] = []
+                    for line in raw_stdout.splitlines():
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        try:
+                            line_data = json.loads(line_str)
+                            if isinstance(line_data, dict):
+                                parsed_lines.append(line_data)
+                                if "result" in line_data:
+                                    text_parts.append(str(line_data["result"]))
+                                elif "text" in line_data:
+                                    text_parts.append(str(line_data["text"]))
+                                if "session_id" in line_data:
+                                    extracted_session_id = str(line_data["session_id"])
+                                elif "sessionId" in line_data:
+                                    extracted_session_id = str(line_data["sessionId"])
+                        except json.JSONDecodeError:
+                            continue
+
+                    if parsed_lines:
+                        raw_events = parsed_lines
+                        if text_parts:
+                            extracted_text = "\n".join(text_parts)
 
         # Fallback session ID detection via regex if not found in structured JSON
         if not extracted_session_id:

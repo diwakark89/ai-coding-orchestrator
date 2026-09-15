@@ -44,7 +44,7 @@ Before making changes:
 
 ---
 
-# Phase 1 — Project Foundation and CLI
+# Phase 1 — Project Foundation and CLI [DONE]
 
 ## Objective
 
@@ -371,7 +371,7 @@ Phase is complete only when:
 
 ---
 
-# Phase 2 — Provider CLI Adapter Layer
+# Phase 2 — Provider CLI Adapter Layer [DONE]
 
 ## Objective
 
@@ -2226,10 +2226,11 @@ Use these implementation milestones:
 
 ```text
 Milestone 1
-Phase 1
+Phase 1 [DONE]
 
 Milestone 2
-Phase 2
+Phase 2 [DONE]
+
 
 Milestone 3
 Phase 3
