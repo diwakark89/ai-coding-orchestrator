@@ -1,0 +1,133 @@
+version: 1
+project:
+  name: ai-coding-orchestrator
+models:
+  planner:
+    default:
+      provider: anthropic
+      model: Claude Sonnet 5
+    architecture:
+      provider: anthropic
+      model: Claude Opus 5
+  implementation:
+    lightweight:
+      provider: openai
+      model: GPT-5.6 Luna
+    standard:
+      provider: openai
+      model: GPT-5.6 Terra
+    escalation:
+      provider: anthropic
+      model: Claude Sonnet 5
+  review:
+    default:
+      provider: google
+      model: Gemini 3.8 Flash
+    deep:
+      provider: anthropic
+      model: Claude Sonnet 5
+    architecture:
+      provider: anthropic
+      model: Claude Opus 5
+  documentation:
+    default:
+      provider: google
+      model: Gemini 3.8 Flash
+complexity:
+  file_count:
+    1-3: 0
+    4-7: 1
+    8+: 2
+  flags:
+    schema_change: 1
+    api_contract_change: 1
+    transaction_logic: 2
+    concurrency: 2
+    idempotency: 2
+    authentication: 2
+    authorization: 2
+    data_ownership: 2
+    payment: 3
+    security_boundary_change: 3
+    external_integration: 1
+    new_dependency: 1
+    architecture_change: 3
+    ai_or_rag: 2
+    performance_sensitive: 1
+  thresholds:
+    LOW:
+      min: 0
+      max: 2
+    MEDIUM:
+      min: 3
+      max: 5
+    HIGH:
+      min: 6
+routing:
+  planning:
+    architecture_if_any:
+    - architecture_change
+    - new_service
+    - new_datastore
+    - security_boundary_change
+    - payment
+    - cross_service_ownership_change
+    default: planner.default
+    architecture: planner.architecture
+  implementation:
+    force_standard_if_any:
+    - authentication
+    - authorization
+    - data_ownership
+    - concurrency
+    - idempotency
+    - transaction_logic
+    - destructive_schema_change
+    - payment
+    - security_boundary_change
+    - ai_or_rag
+    rules:
+    - id: low-complexity
+      when:
+        complexity: low
+      use: implementation.lightweight
+    - id: medium-complexity
+      when:
+        complexity: medium
+      use: implementation.standard
+    - id: high-complexity
+      when:
+        complexity: high
+      use: implementation.standard
+  review:
+    deep_if_any:
+    - authentication
+    - authorization
+    - payment
+    - concurrency
+    - transaction_logic
+    - data_ownership
+    - destructive_schema_change
+    architecture_if:
+      architecture_change: true
+    default: review.default
+    deep: review.deep
+    architecture: review.architecture
+    medium_is_mandatory: false
+  documentation:
+    default: documentation.default
+verification:
+  python:
+    detect:
+    - pyproject.toml
+    commands:
+    - pytest
+limits:
+  planning_turns: 20
+  implementation_attempts: 3
+  lightweight_verification_failures: 2
+  standard_failures: 2
+  review_fix_cycles: 2
+documentation:
+  enabled: false
+  candidate_files: []
