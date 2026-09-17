@@ -176,7 +176,7 @@ def test_cli_run_cancelled_exits_nonzero(monkeypatch):
 def test_cli_route_displays_decision_and_exits_zero(monkeypatch):
     """agentflow route prints the routing decision and exits 0 on success."""
 
-    async def fake_run_routing(self, task_description, project_path=None, user_override=None):
+    async def fake_run_routing(self, task_description, project_path=None, role_override=None):
         planning = PlanningOutcome(run_id="RUN-ROUTE01", state=WorkflowState.TASK_CLASSIFIED)
         decision = RoutingDecision(
             stage=Stage.IMPLEMENTATION,
@@ -206,7 +206,7 @@ def test_cli_route_displays_decision_and_exits_zero(monkeypatch):
 def test_cli_route_blocked_exits_nonzero(monkeypatch):
     """agentflow route exits 1 when planning does not reach TASK_CLASSIFIED."""
 
-    async def fake_run_routing(self, task_description, project_path=None, user_override=None):
+    async def fake_run_routing(self, task_description, project_path=None, role_override=None):
         planning = PlanningOutcome(
             run_id="RUN-ROUTE02", state=WorkflowState.BLOCKED, blocker_reason="nope"
         )
@@ -231,7 +231,7 @@ def test_cli_implement_reports_success(monkeypatch, tmp_path: Path):
     """agentflow implement reports success and exits 0 when verification passes."""
 
     async def fake_run_implementation(
-        self, task_description, project_path=None, user_override=None
+        self, task_description, project_path=None, role_override=None
     ):
         from agentflow.git.worktree import WorktreeHandle
         from agentflow.workflow.implementation import ImplementationOutcome
@@ -266,7 +266,7 @@ def test_cli_implement_blocked_exits_nonzero(monkeypatch):
     """agentflow implement exits 1 and surfaces the reason when implementation is blocked."""
 
     async def fake_run_implementation(
-        self, task_description, project_path=None, user_override=None
+        self, task_description, project_path=None, role_override=None
     ):
         planning = PlanningOutcome(run_id="RUN-IMPL02", state=WorkflowState.TASK_CLASSIFIED)
         return ImplementationRunOutcome(
@@ -286,7 +286,7 @@ def test_cli_complete_reports_success(monkeypatch, tmp_path: Path):
     """agentflow complete reports COMPLETED and exits 0 when the full pipeline succeeds."""
 
     async def fake_run_pipeline(
-        self, task_description, project_path=None, user_override=None, final_approval_prompt=None
+        self, task_description, project_path=None, role_override=None, final_approval_prompt=None
     ):
         planning = PlanningOutcome(run_id="RUN-COMPLETE01", state=WorkflowState.TASK_CLASSIFIED)
         implementation_outcome = ImplementationRunOutcome(
@@ -310,7 +310,7 @@ def test_cli_complete_blocked_exits_nonzero(monkeypatch):
     """agentflow complete exits 1 and surfaces the reason when the pipeline is blocked."""
 
     async def fake_run_pipeline(
-        self, task_description, project_path=None, user_override=None, final_approval_prompt=None
+        self, task_description, project_path=None, role_override=None, final_approval_prompt=None
     ):
         planning = PlanningOutcome(run_id="RUN-COMPLETE02", state=WorkflowState.TASK_CLASSIFIED)
         implementation_outcome = ImplementationRunOutcome(
@@ -333,7 +333,7 @@ def test_cli_complete_cancelled_exits_nonzero(monkeypatch):
     """agentflow complete exits 1 when the user cancels at final approval."""
 
     async def fake_run_pipeline(
-        self, task_description, project_path=None, user_override=None, final_approval_prompt=None
+        self, task_description, project_path=None, role_override=None, final_approval_prompt=None
     ):
         planning = PlanningOutcome(run_id="RUN-COMPLETE03", state=WorkflowState.TASK_CLASSIFIED)
         implementation_outcome = ImplementationRunOutcome(
@@ -354,7 +354,7 @@ def test_cli_resume_reports_completion(monkeypatch, tmp_path: Path):
     """agentflow resume reports a recovered run's final summary when it completes."""
 
     async def fake_run_resume(
-        self, run_id, project_path=None, user_override=None, final_approval_prompt=None
+        self, run_id, project_path=None, role_override=None, final_approval_prompt=None
     ):
         planning = PlanningOutcome(run_id=run_id, state=WorkflowState.TASK_CLASSIFIED)
         implementation_outcome = ImplementationRunOutcome(
@@ -378,7 +378,7 @@ def test_cli_resume_errors_exit_nonzero(monkeypatch):
     """agentflow resume surfaces recovery errors with a nonzero exit code."""
 
     async def fake_run_resume(
-        self, run_id, project_path=None, user_override=None, final_approval_prompt=None
+        self, run_id, project_path=None, role_override=None, final_approval_prompt=None
     ):
         from agentflow.errors import ResumeError
 

@@ -3,6 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentflow.agents.base import Provider, validate_model_allowed
+from agentflow.task.profile import Stage
 
 
 class ModelRef(BaseModel):
@@ -32,6 +33,22 @@ class ModelRef(BaseModel):
     def provider_enum(self) -> Provider:
         """Resolve the string provider field to its Provider enum member."""
         return Provider.from_string(self.provider)
+
+
+class RoleOverride(BaseModel):
+    """User-specified provider/model overrides, scoped per pipeline stage.
+
+    Unlike a single global override, each stage's `route()` call only sees an override when
+    this stage is present in `overrides` -- a stage not listed here is routed normally.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    overrides: dict[Stage, ModelRef] = Field(default_factory=dict)
+
+    def for_stage(self, stage: Stage) -> ModelRef | None:
+        """Return the override for `stage`, or None if this stage isn't overridden."""
+        return self.overrides.get(stage)
 
 
 class PlannerModels(BaseModel):

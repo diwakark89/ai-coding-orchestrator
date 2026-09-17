@@ -11,7 +11,12 @@ from agentflow.config.models import DocumentationConfig, VerificationGroup
 from agentflow.git.worktree import WorktreeManager
 from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
-from agentflow.routing.rules import DEFAULT_MODELS_CONFIG, DEFAULT_ROUTING_RULES
+from agentflow.routing.rules import (
+    DEFAULT_MODELS_CONFIG,
+    DEFAULT_ROUTING_RULES,
+    ModelRef,
+    RoleOverride,
+)
 from agentflow.task.profile import Stage, TaskProfile
 from agentflow.workflow.documentation import DocumentationWorkflow
 from agentflow.workflow.states import WorkflowState
@@ -112,7 +117,9 @@ async def make_environment(git_repo: Path, tmp_path: Path):
     return db, ctx, task_profile, worktree_manager, handle.path
 
 
-def make_workflow(db, registry, worktree_manager, verifier=None) -> DocumentationWorkflow:
+def make_workflow(
+    db, registry, worktree_manager, verifier=None, role_override=None
+) -> DocumentationWorkflow:
     return DocumentationWorkflow(
         db,
         registry,
@@ -120,6 +127,7 @@ def make_workflow(db, registry, worktree_manager, verifier=None) -> Documentatio
         verifier or ScriptedVerificationRunner([]),
         DEFAULT_MODELS_CONFIG,
         DEFAULT_ROUTING_RULES,
+        role_override=role_override,
     )
 
 
@@ -328,3 +336,68 @@ async def test_documentation_prompt_includes_final_context(git_repo: Path, tmp_p
     assert "The Plan Objective" in prompt
     assert "added line" in prompt
     assert "architecture.md" in prompt
+
+
+@pytest.mark.asyncio
+async def test_documentation_records_documenting_stage(git_repo: Path, tmp_path: Path):
+    """Agent session bookkeeping uses WorkflowState.DOCUMENTING, not a raw string, for stage."""
+    db, ctx, task_profile, worktree_manager, worktree_path = await make_environment(
+        git_repo, tmp_path
+    )
+    registry = AgentAdapterRegistry()
+    registry.register(
+        Provider.GOOGLE, ScriptedAdapter(Provider.GOOGLE, make_result(), "architecture.md")
+    )
+    workflow = make_workflow(db, registry, worktree_manager)
+
+    await workflow.run(
+        "run_1",
+        worktree_path,
+        ctx,
+        "# Plan",
+        task_profile,
+        "diff",
+        passed_verification(),
+        [],
+        DocumentationConfig(enabled=True, candidate_files=["architecture.md"]),
+        None,
+    )
+
+    sessions = db.list_agent_sessions("run_1")
+    assert len(sessions) == 1
+    assert sessions[0].stage == WorkflowState.DOCUMENTING.value
+
+
+@pytest.mark.asyncio
+async def test_documentation_honors_role_override(git_repo: Path, tmp_path: Path):
+    """A RoleOverride targeting DOCUMENTATION routes the documentation agent to it."""
+    db, ctx, task_profile, worktree_manager, worktree_path = await make_environment(
+        git_repo, tmp_path
+    )
+    registry = AgentAdapterRegistry()
+    registry.register(
+        Provider.ANTHROPIC, ScriptedAdapter(Provider.ANTHROPIC, make_result(), "architecture.md")
+    )
+    override = RoleOverride(
+        overrides={Stage.DOCUMENTATION: ModelRef(provider="anthropic", model="Claude Sonnet 5")}
+    )
+    workflow = make_workflow(db, registry, worktree_manager, role_override=override)
+
+    outcome = await workflow.run(
+        "run_1",
+        worktree_path,
+        ctx,
+        "# Plan",
+        task_profile,
+        "diff",
+        passed_verification(),
+        [],
+        DocumentationConfig(enabled=True, candidate_files=["architecture.md"]),
+        None,
+    )
+
+    assert outcome.enabled is True
+    assert not outcome.blocked
+    decisions = db.list_routing_decisions("run_1")
+    assert decisions[-1].provider == "anthropic"
+    assert decisions[-1].model == "Claude Sonnet 5"

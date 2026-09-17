@@ -26,6 +26,8 @@ class WorkflowState(str, Enum):
     REVIEW_FIXING = "REVIEW_FIXING"
     REVIEW_APPROVED = "REVIEW_APPROVED"
 
+    DOCUMENTING = "DOCUMENTING"
+
     READY_FOR_APPROVAL = "READY_FOR_APPROVAL"
     COMPLETED = "COMPLETED"
 
@@ -94,6 +96,14 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
         {WorkflowState.VERIFYING, WorkflowState.BLOCKED, WorkflowState.FAILED}
     ),
     WorkflowState.REVIEW_APPROVED: frozenset(
+        {
+            WorkflowState.DOCUMENTING,
+            WorkflowState.READY_FOR_APPROVAL,
+            WorkflowState.BLOCKED,
+            WorkflowState.FAILED,
+        }
+    ),
+    WorkflowState.DOCUMENTING: frozenset(
         {WorkflowState.READY_FOR_APPROVAL, WorkflowState.BLOCKED, WorkflowState.FAILED}
     ),
     WorkflowState.READY_FOR_APPROVAL: frozenset(

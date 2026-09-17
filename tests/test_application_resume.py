@@ -25,6 +25,8 @@ from agentflow.git.worktree import WorktreeManager
 from agentflow.persistence.database import DatabaseManager
 from agentflow.persistence.models import RunStatus
 from agentflow.project.discovery import discover_project
+from agentflow.routing.rules import ModelRef, RoleOverride
+from agentflow.task.profile import Stage
 from agentflow.ui.approval import ApprovalDecision, FinalApprovalDecision
 from agentflow.workflow.states import WorkflowState
 
@@ -603,3 +605,118 @@ async def test_cleanup_preserves_nonterminal_worktree(git_repo: Path, tmp_path: 
     assert report.worktrees_removed == []
     assert report.skipped_active == [run_id]
     assert handle.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_resume_blocked_run_retries_from_recovered_stage(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A BLOCKED run (agent CLI failure) is resumed by retrying the stage it blocked in."""
+    monkeypatch.setattr(
+        planning_module, "ask_plan_approval", lambda console_instance=None: ApprovalDecision.APPROVE
+    )
+    _prepare_repo(git_repo)
+    registry, claude, codex, gemini = make_registry()
+    app_instance = make_app(registry, tmp_path)
+
+    planning_outcome = await app_instance.run_planning("Add a health check", project_path=git_repo)
+    run_id = planning_outcome.run_id
+    assert planning_outcome.state == WorkflowState.TASK_CLASSIFIED
+
+    # Simulate implementation starting, then its coding-agent CLI failing (e.g. a usage limit).
+    app_instance.db_manager.update_run_state(
+        run_id, WorkflowState.IMPLEMENTING.value, "implementation started"
+    )
+    app_instance.db_manager.update_run_state(
+        run_id, WorkflowState.BLOCKED.value, "Codex CLI hit a usage limit"
+    )
+    app_instance.db_manager.update_run_status(run_id, RunStatus.BLOCKED.value)
+
+    outcome = await app_instance.run_resume(
+        run_id, project_path=git_repo, final_approval_prompt=lambda: FinalApprovalDecision.APPROVE
+    )
+
+    assert outcome.state == WorkflowState.COMPLETED
+    assert claude.calls == 1  # planning was not re-invoked
+    assert codex.calls == 1
+    assert gemini.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_blocked_run_with_no_recoverable_stage_raises(
+    git_repo: Path, tmp_path: Path
+):
+    """A BLOCKED run whose only recorded prior state is NEW cannot be resumed."""
+    registry, *_ = make_registry()
+    app_instance = make_app(registry, tmp_path)
+    app_instance.initialize()
+    ctx = discover_project(explicit_path=git_repo)
+    app_instance.db_manager.upsert_project(ctx.project_id, ctx.project_name, str(git_repo))
+    run_id = "RUN-NOWHERE"
+    app_instance.db_manager.create_run(
+        run_id=run_id, project_id=ctx.project_id, task="Add a feature"
+    )
+    app_instance.db_manager.update_run_state(
+        run_id, WorkflowState.BLOCKED.value, "blocked immediately"
+    )
+
+    with pytest.raises(ResumeError, match="no recoverable prior stage"):
+        await app_instance.run_resume(run_id, project_path=git_repo)
+
+
+@pytest.mark.asyncio
+async def test_resume_blocked_run_honors_role_override_for_recovered_stage(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A role_override scoped to IMPLEMENTATION reroutes the retried stage away from its
+    original provider entirely."""
+    monkeypatch.setattr(
+        planning_module, "ask_plan_approval", lambda console_instance=None: ApprovalDecision.APPROVE
+    )
+    _prepare_repo(git_repo)
+
+    def write_feature(worktree: Path) -> None:
+        (worktree / "feature.py").write_text("print('hi')\n", encoding="utf-8")
+
+    claude = ScriptedAdapter(
+        Provider.ANTHROPIC,
+        [
+            (make_agent_result(Provider.ANTHROPIC, "sonnet", plan_ready_payload()), None),
+            (make_agent_result(Provider.ANTHROPIC, "sonnet"), write_feature),
+        ],
+    )
+    codex = ScriptedAdapter(Provider.OPENAI, [])  # must never be invoked
+    gemini = ScriptedAdapter(
+        Provider.GOOGLE, [(make_agent_result(Provider.GOOGLE, "flash", review_payload()), None)]
+    )
+    registry = AgentAdapterRegistry()
+    registry.register(Provider.ANTHROPIC, claude)
+    registry.register(Provider.OPENAI, codex)
+    registry.register(Provider.GOOGLE, gemini)
+    app_instance = make_app(registry, tmp_path)
+
+    planning_outcome = await app_instance.run_planning("Add a health check", project_path=git_repo)
+    run_id = planning_outcome.run_id
+
+    app_instance.db_manager.update_run_state(
+        run_id, WorkflowState.IMPLEMENTING.value, "implementation started"
+    )
+    app_instance.db_manager.update_run_state(
+        run_id, WorkflowState.BLOCKED.value, "Codex CLI hit a usage limit"
+    )
+    app_instance.db_manager.update_run_status(run_id, RunStatus.BLOCKED.value)
+
+    role_override = RoleOverride(
+        overrides={Stage.IMPLEMENTATION: ModelRef(provider="anthropic", model="Claude Sonnet 5")}
+    )
+    outcome = await app_instance.run_resume(
+        run_id,
+        project_path=git_repo,
+        role_override=role_override,
+        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+    )
+
+    assert outcome.state == WorkflowState.COMPLETED
+    assert claude.calls == 2  # planning, then the overridden re-implementation
+    assert codex.calls == 0  # never routed to -- override replaced it entirely
+    assert gemini.calls == 1

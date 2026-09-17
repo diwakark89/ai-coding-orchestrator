@@ -7,15 +7,17 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from rich.table import Table
 
 from agentflow.agents.registry import AgentAdapterRegistry, create_default_registry
 from agentflow.concurrency.run_lock import RunLock
 from agentflow.config.loader import load_global_config
 from agentflow.config.models import GlobalConfig, ProjectConfig
-from agentflow.errors import ProjectNotFoundError, ResumeError, WorktreeError
+from agentflow.errors import InitError, ProjectNotFoundError, ResumeError, WorktreeError
 from agentflow.git.lock import WorktreeLock
 from agentflow.git.worktree import WorktreeHandle, WorktreeManager
 from agentflow.observability.metrics import StatisticsReport, StatisticsService
@@ -23,11 +25,12 @@ from agentflow.persistence.database import DatabaseManager
 from agentflow.persistence.models import RunStatus
 from agentflow.process.executor import ProcessExecutor
 from agentflow.project.context import ProjectContext
-from agentflow.project.discovery import discover_project
+from agentflow.project.discovery import ROUTING_CONFIG_RELATIVE_PATH, discover_project
+from agentflow.project.init import build_starter_config
 from agentflow.routing.decision import RoutingDecision
 from agentflow.routing.engine import route
-from agentflow.routing.rules import DEFAULT_MODELS_CONFIG, DEFAULT_ROUTING_RULES, ModelRef
-from agentflow.task.profile import TaskProfile
+from agentflow.routing.rules import DEFAULT_MODELS_CONFIG, DEFAULT_ROUTING_RULES, RoleOverride
+from agentflow.task.profile import Stage, TaskProfile
 from agentflow.ui.approval import FinalApprovalDecision, ask_final_approval
 from agentflow.ui.console import CHECKMARK, CROSSMARK, WARNINGMARK, ConsoleUI
 from agentflow.workflow.completion import FinalSummary, write_final_summary_artifact
@@ -35,7 +38,7 @@ from agentflow.workflow.documentation import DocumentationOutcome, Documentation
 from agentflow.workflow.implementation import ImplementationOutcome, ImplementationWorkflow
 from agentflow.workflow.planning import PlanningOutcome, PlanningWorkflow
 from agentflow.workflow.repair import RepairOutcome, RepairWorkflow
-from agentflow.workflow.review import ReviewOutcome, ReviewWorkflow
+from agentflow.workflow.review import ReviewOutcome, ReviewReport, ReviewWorkflow
 from agentflow.workflow.states import WorkflowState, transition_run_state
 from agentflow.workflow.verification import VerificationResult, VerificationRunner
 
@@ -67,6 +70,7 @@ class DoctorCheckItem:
     critical: bool
     details: str = ""
     is_warning: bool = False
+    regressed: bool = False
 
 
 @dataclass
@@ -120,6 +124,15 @@ class PipelineOutcome:
     final_summary: FinalSummary | None = None
     final_summary_path: Path | None = None
     blocker_reason: str | None = None
+
+
+@dataclass
+class InitResult:
+    """Result of `agentflow init`: where the starter profile was written, and what it found."""
+
+    path: Path
+    detected_groups: list[str] = field(default_factory=list)
+    overwritten: bool = False
 
 
 @dataclass
@@ -206,50 +219,76 @@ class Application:
             )
 
     def check_cli(self, provider_name: str, command: str) -> DoctorCheckItem:
-        """Check availability and functionality of a provider CLI using a lightweight command."""
+        """Check availability and functionality of a provider CLI using a lightweight command.
+
+        Compares the fresh result against the last recorded `doctor` check for this provider
+        (persisted in the `cli_availability` table) so a CLI that used to work and now doesn't
+        can be flagged distinctly from an ordinary first-time-missing warning.
+        """
         cli_path = shutil.which(command)
         if not cli_path:
-            return DoctorCheckItem(
+            result = DoctorCheckItem(
                 name=f"{provider_name} CLI",
                 passed=False,
                 critical=False,
                 is_warning=True,
                 details=f"Executable '{command}' not found in PATH",
             )
-
-        # Validate using a lightweight command (no model requests sent)
-        try:
-            res = self.executor.run_sync([command, "--version"], timeout=5.0)
-            if res.exit_code == 0:
-                first_line = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
-                if not first_line and res.stderr.strip():
-                    first_line = res.stderr.strip().splitlines()[0]
-                details = (
-                    f"Found: {cli_path} ({first_line})" if first_line else f"Found: {cli_path}"
-                )
-                return DoctorCheckItem(
+        else:
+            # Validate using a lightweight command (no model requests sent)
+            try:
+                res = self.executor.run_sync([command, "--version"], timeout=5.0)
+                if res.exit_code == 0:
+                    first_line = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
+                    if not first_line and res.stderr.strip():
+                        first_line = res.stderr.strip().splitlines()[0]
+                    details = (
+                        f"Found: {cli_path} ({first_line})"
+                        if first_line
+                        else f"Found: {cli_path}"
+                    )
+                    result = DoctorCheckItem(
+                        name=f"{provider_name} CLI",
+                        passed=True,
+                        critical=False,
+                        details=details,
+                    )
+                else:
+                    result = DoctorCheckItem(
+                        name=f"{provider_name} CLI",
+                        passed=False,
+                        critical=False,
+                        is_warning=True,
+                        details=(
+                            f"Executable at {cli_path} failed '--version' check "
+                            f"(exit code {res.exit_code})"
+                        ),
+                    )
+            except Exception as e:
+                result = DoctorCheckItem(
                     name=f"{provider_name} CLI",
-                    passed=True,
+                    passed=False,
                     critical=False,
-                    details=details,
+                    is_warning=True,
+                    details=f"Executable at {cli_path} could not be executed: {e}",
                 )
-            return DoctorCheckItem(
-                name=f"{provider_name} CLI",
-                passed=False,
-                critical=False,
-                is_warning=True,
-                details=(
-                    f"Executable at {cli_path} failed '--version' check (exit code {res.exit_code})"
-                ),
+
+        try:
+            previous = self.db_manager.get_cli_availability(provider_name)
+            if previous is not None and previous.available and not result.passed:
+                result.regressed = True
+                result.details = f"Previously available, now missing: {result.details}"
+            self.db_manager.upsert_cli_availability(
+                provider_name,
+                command,
+                result.passed,
+                datetime.now(timezone.utc).isoformat(),
             )
-        except Exception as e:
-            return DoctorCheckItem(
-                name=f"{provider_name} CLI",
-                passed=False,
-                critical=False,
-                is_warning=True,
-                details=f"Executable at {cli_path} could not be executed: {e}",
-            )
+        except Exception:
+            # Caching is a diagnostic nicety, never a reason to fail the underlying CLI check.
+            pass
+
+        return result
 
     def check_storage_writable(self) -> DoctorCheckItem:
         """Check if the AgentFlow global storage and worktrees directories are writable."""
@@ -394,6 +433,13 @@ class Application:
         """Run all environment health checks and collect DoctorReport."""
         report = DoctorReport()
 
+        try:
+            # Ensure `cli_availability` (and every other table) exists before check_cli needs
+            # it; check_sqlite below re-verifies this properly and reports any real failure.
+            self.db_manager.initialize()
+        except Exception:
+            pass
+
         report.items.append(self.check_python())
         report.items.append(self.check_git())
         report.items.append(self.check_cli("Claude", self.config.cli.claude.command))
@@ -421,7 +467,9 @@ class Application:
         table.add_column("Details", style="dim")
 
         for item in report.items:
-            if item.passed:
+            if item.regressed:
+                status_text = f"[bold red]{WARNINGMARK}[/bold red]"
+            elif item.passed:
                 status_text = f"[bold green]{CHECKMARK}[/bold green]"
             elif item.is_warning:
                 status_text = f"[bold yellow]{WARNINGMARK}[/bold yellow]"
@@ -438,6 +486,36 @@ class Application:
             )
         else:
             self.ui.print_success("All critical environment checks passed.")
+
+    def run_init(self, project_path: Path | None = None, force: bool = False) -> InitResult:
+        """Generate a starter `.ai-orchestrator/routing.yaml` for a project.
+
+        Detects common per-directory test setups (Node/Python/Java) as a starting point only --
+        always review the generated file before running real tasks against it. Refuses to
+        overwrite an existing profile unless `force` is set.
+        """
+        ctx = discover_project(explicit_path=project_path)
+        routing_path = ctx.root_path / ROUTING_CONFIG_RELATIVE_PATH
+        already_existed = routing_path.exists()
+        if already_existed and not force:
+            raise InitError(
+                f"{routing_path} already exists. Pass --force to overwrite it."
+            )
+
+        config = build_starter_config(ctx.root_path)
+        routing_path.parent.mkdir(parents=True, exist_ok=True)
+        routing_path.write_text(
+            yaml.safe_dump(
+                config.model_dump(mode="json", exclude_none=True),
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return InitResult(
+            path=routing_path,
+            detected_groups=sorted(config.verification or {}),
+            overwritten=already_existed,
+        )
 
     def get_status_message(self, project_path: Path | None = None) -> str:
         """Get status message for active runs."""
@@ -484,7 +562,7 @@ class Application:
         self,
         planning_outcome: PlanningOutcome,
         project_context: ProjectContext,
-        user_override: ModelRef | None,
+        role_override: RoleOverride | None,
     ) -> RoutingDecision:
         """Compute a deterministic RoutingDecision for a classified task and persist it."""
         assert planning_outcome.task_profile is not None
@@ -495,7 +573,9 @@ class Application:
             models=routing_config.models if routing_config else None,
             routing_rules=routing_config.routing if routing_config else None,
             complexity_config=routing_config.complexity if routing_config else None,
-            user_override=user_override,
+            user_override=(
+                role_override.for_stage(Stage.IMPLEMENTATION) if role_override else None
+            ),
         )
 
         if planning_outcome.plan_path is not None:
@@ -520,7 +600,7 @@ class Application:
         self,
         task_description: str,
         project_path: Path | None = None,
-        user_override: ModelRef | None = None,
+        role_override: RoleOverride | None = None,
     ) -> RoutingOutcome:
         """Classify a task via planning, then compute and persist its routing decision.
 
@@ -534,7 +614,7 @@ class Application:
             return RoutingOutcome(planning_outcome=planning_outcome)
 
         ctx = discover_project(explicit_path=project_path)
-        decision = self._route_and_persist(planning_outcome, ctx, user_override)
+        decision = self._route_and_persist(planning_outcome, ctx, role_override)
 
         decision_path = None
         if planning_outcome.plan_path is not None:
@@ -548,7 +628,7 @@ class Application:
         self,
         task_description: str,
         project_path: Path | None = None,
-        user_override: ModelRef | None = None,
+        role_override: RoleOverride | None = None,
     ) -> ImplementationRunOutcome:
         """Shared core for run_implementation and run_pipeline.
 
@@ -573,7 +653,7 @@ class Application:
         run_lock.acquire()
         try:
             return await self._implement_and_verify_classified(
-                planning_outcome, task_description, ctx, user_override
+                planning_outcome, task_description, ctx, role_override
             )
         finally:
             run_lock.release()
@@ -583,12 +663,12 @@ class Application:
         planning_outcome: PlanningOutcome,
         task_description: str,
         ctx: ProjectContext,
-        user_override: ModelRef | None,
+        role_override: RoleOverride | None,
     ) -> ImplementationRunOutcome:
         """Implement and verify a classified task while its run-level lock is held."""
         assert planning_outcome.plan_markdown is not None
         assert planning_outcome.task_profile is not None
-        decision = self._route_and_persist(planning_outcome, ctx, user_override)
+        decision = self._route_and_persist(planning_outcome, ctx, role_override)
         routing_config = ctx.routing_config
 
         worktree_manager = WorktreeManager(self.config.worktrees.root, executor=self.executor)
@@ -690,7 +770,7 @@ class Application:
         self,
         task_description: str,
         project_path: Path | None = None,
-        user_override: ModelRef | None = None,
+        role_override: RoleOverride | None = None,
     ) -> ImplementationRunOutcome:
         """Plan, route, implement inside an isolated worktree, then verify and repair.
 
@@ -698,7 +778,7 @@ class Application:
         Git worktree under the configured worktrees root.
         """
         outcome = await self._plan_route_implement_and_verify(
-            task_description, project_path=project_path, user_override=user_override
+            task_description, project_path=project_path, role_override=role_override
         )
         if outcome.verification is not None and outcome.verification.success:
             self.db_manager.update_run_status(
@@ -730,7 +810,7 @@ class Application:
         self,
         task_description: str,
         project_path: Path | None = None,
-        user_override: ModelRef | None = None,
+        role_override: RoleOverride | None = None,
         final_approval_prompt: Callable[[], FinalApprovalDecision] | None = None,
     ) -> PipelineOutcome:
         """Plan, route, implement, verify/repair, review, document, then await human approval.
@@ -738,7 +818,7 @@ class Application:
         V1 never auto-pushes, auto-merges, or deploys -- only a human decides completion.
         """
         impl_outcome = await self._plan_route_implement_and_verify(
-            task_description, project_path=project_path, user_override=user_override
+            task_description, project_path=project_path, role_override=role_override
         )
         run_id = impl_outcome.planning_outcome.run_id
 
@@ -777,6 +857,7 @@ class Application:
                 impl_outcome.verification,
                 impl_outcome,
                 final_approval_prompt,
+                role_override,
             )
         finally:
             run_lock.release()
@@ -794,6 +875,7 @@ class Application:
         verification: VerificationResult,
         impl_outcome: ImplementationRunOutcome,
         final_approval_prompt: Callable[[], FinalApprovalDecision] | None,
+        role_override: RoleOverride | None = None,
     ) -> PipelineOutcome:
         """Review, document, and await human approval for an already-verified worktree.
 
@@ -824,6 +906,7 @@ class Application:
             routing_rules_cfg,
             limits,
             self.ui,
+            role_override=role_override,
         )
         review_outcome = await review_workflow.run(
             run_id,
@@ -847,6 +930,18 @@ class Application:
         final_verification = review_outcome.verification_result or verification
         pre_doc_diff = await worktree_manager.capture_changes(worktree_path)
 
+        doc_config = routing_config.documentation if routing_config else None
+        will_run_documentation = bool(
+            doc_config and doc_config.enabled and doc_config.candidate_files
+        )
+        if will_run_documentation:
+            transition_run_state(
+                self.db_manager,
+                run_id,
+                WorkflowState.DOCUMENTING,
+                "Review approved; starting documentation sync",
+            )
+
         documentation_workflow = DocumentationWorkflow(
             self.db_manager,
             self.agent_registry,
@@ -855,6 +950,7 @@ class Application:
             models_cfg,
             routing_rules_cfg,
             self.ui,
+            role_override=role_override,
         )
         documentation_outcome = await documentation_workflow.run(
             run_id,
@@ -969,15 +1065,85 @@ class Application:
             return None
         return TaskProfile.model_validate_json(text)
 
+    def _read_verification_artifact(self, run_dir: Path) -> VerificationResult | None:
+        """Load the persisted verification.json artifact, if present."""
+        text = self._read_artifact_text(run_dir / "verification.json")
+        if text is None:
+            return None
+        return VerificationResult.model_validate_json(text)
+
+    def _read_review_findings_artifact(self, run_dir: Path) -> ReviewReport | None:
+        """Load the persisted review-findings.json artifact, if present."""
+        text = self._read_artifact_text(run_dir / "review-findings.json")
+        if text is None:
+            return None
+        return ReviewReport.model_validate_json(text)
+
+    def _report_stale_artifacts(self, project_root: Path, run_id: str) -> None:
+        """Surface leftover verification/review artifacts from a run being resumed after BLOCKED.
+
+        Informational only -- resume always re-runs verification and review regardless, so this
+        never changes control flow. It exists so these persisted artifacts are actually read by
+        something instead of sitting on disk unconsumed.
+        """
+        run_dir = project_root / ".ai-orchestrator" / "runs" / run_id
+        verification = self._read_verification_artifact(run_dir)
+        if verification is not None:
+            self.ui.print_info(
+                f"Note: a prior verification.json exists (status: {verification.status.value}) "
+                "-- verification will be re-run."
+            )
+        review = self._read_review_findings_artifact(run_dir)
+        if review is not None:
+            self.ui.print_info(
+                f"Note: a prior review-findings.json exists (status: {review.status}) "
+                "-- review will be re-run."
+            )
+
     def _load_persisted_routing_decision(
-        self, run_dir: Path, planning_outcome: PlanningOutcome, ctx: ProjectContext
+        self,
+        run_dir: Path,
+        planning_outcome: PlanningOutcome,
+        ctx: ProjectContext,
+        role_override: RoleOverride | None = None,
     ) -> RoutingDecision:
         """Reload the original implementation RoutingDecision artifact, recomputing as a
         fallback (routing is deterministic and reproducible from the persisted TaskProfile)."""
         text = self._read_artifact_text(run_dir / "routing-decision.json")
         if text is None:
-            return self._route_and_persist(planning_outcome, ctx, None)
+            return self._route_and_persist(planning_outcome, ctx, role_override)
         return RoutingDecision.model_validate_json(text)
+
+    def _recover_pre_blocked_state(self, run_id: str) -> WorkflowState:
+        """Resolve the stage a BLOCKED run was in immediately before it blocked, and force the
+        persisted state back to it so `_resume_locked` can re-enter the pipeline there.
+
+        Reuses the same unvalidated `update_run_state` bypass `_resume_reimplement` already uses
+        for crash recovery: the run's last-persisted state isn't a legal `transition_run_state`
+        predecessor of the recovery action about to be taken, so the strict validator doesn't
+        apply here -- the same reasoning applies to a run blocked by an agent-CLI failure.
+        """
+        transitions = self.db_manager.list_state_transitions(run_id)
+        recovered = next(
+            (
+                t.from_state
+                for t in reversed(transitions)
+                if t.to_state == WorkflowState.BLOCKED.value
+            ),
+            None,
+        )
+        if not recovered or recovered == WorkflowState.NEW.value:
+            raise ResumeError(
+                f"Run '{run_id}' is BLOCKED with no recoverable prior stage; "
+                "start a new run instead."
+            )
+        recovered_state = WorkflowState(recovered)
+        self.db_manager.update_run_state(
+            run_id,
+            recovered_state.value,
+            f"Resuming BLOCKED run: retrying from {recovered_state.value}",
+        )
+        return recovered_state
 
     def _recover_stale_worktree_lock(self, worktree_path: Path) -> None:
         """Clear a worktree writer lock left behind by a dead process; refuse to resume if the
@@ -1002,14 +1168,17 @@ class Application:
         self,
         run_id: str,
         project_path: Path | None = None,
-        user_override: ModelRef | None = None,
+        role_override: RoleOverride | None = None,
         final_approval_prompt: Callable[[], FinalApprovalDecision] | None = None,
     ) -> PipelineOutcome:
-        """Resume a run interrupted by a crash: inspect persisted state and continue safely.
+        """Resume a run interrupted by a crash, or a BLOCKED run, and continue it safely.
 
         Never blindly repeats completed work: if the worktree already holds implementation
         changes, they are re-verified and carried forward instead of re-invoking the
-        implementation agent; only a worktree with no durable changes is recreated.
+        implementation agent; only a worktree with no durable changes is recreated. A BLOCKED
+        run (any coding-agent CLI failure, including a usage-limit error) is recovered by
+        resolving which stage it was in immediately before it blocked and retrying from there;
+        pass `role_override` to route that retry to a different provider/model.
         """
         self.initialize()
         run = self.db_manager.get_run(run_id)
@@ -1022,7 +1191,10 @@ class Application:
                 f"Run '{run_id}' never advanced past creation; nothing to resume. "
                 "Start a new run instead."
             )
-        if current_state in _TERMINAL_STATES:
+        resumed_from_blocked = current_state == WorkflowState.BLOCKED
+        if resumed_from_blocked:
+            current_state = self._recover_pre_blocked_state(run_id)
+        elif current_state in _TERMINAL_STATES:
             raise ResumeError(
                 f"Run '{run_id}' already ended in state {current_state.value}; nothing to resume."
             )
@@ -1038,6 +1210,9 @@ class Application:
                 f"not '{ctx.root_path}'. Pass --project to target the correct repository."
             )
 
+        if resumed_from_blocked:
+            self._report_stale_artifacts(ctx.root_path, run_id)
+
         run_lock = RunLock(run_id, self._locks_root())
         run_lock.acquire()
         try:
@@ -1046,7 +1221,7 @@ class Application:
                 run.task,
                 current_state,
                 ctx,
-                user_override,
+                role_override,
                 final_approval_prompt,
             )
         finally:
@@ -1058,7 +1233,7 @@ class Application:
         persisted_task_description: str,
         current_state: WorkflowState,
         ctx: ProjectContext,
-        user_override: ModelRef | None,
+        role_override: RoleOverride | None,
         final_approval_prompt: Callable[[], FinalApprovalDecision] | None,
     ) -> PipelineOutcome:
         """Reconstruct persisted context and re-enter the pipeline at the correct stage."""
@@ -1121,7 +1296,7 @@ class Application:
                 planning_outcome,
                 plan_markdown,
                 task_profile,
-                user_override,
+                role_override,
                 existing_diff is not None,
             )
             if implementation.state != WorkflowState.VERIFYING or implementation.worktree is None:
@@ -1144,7 +1319,9 @@ class Application:
                 "file(s) already in the worktree; resuming from verification instead of "
                 "re-running implementation."
             )
-            decision = self._load_persisted_routing_decision(run_dir, planning_outcome, ctx)
+            decision = self._load_persisted_routing_decision(
+                run_dir, planning_outcome, ctx, role_override
+            )
             worktree_handle = WorktreeHandle(
                 path=worktree_path, branch_name=branch_name, repository_path=ctx.root_path
             )
@@ -1194,6 +1371,7 @@ class Application:
             verification,
             impl_outcome,
             final_approval_prompt,
+            role_override,
         )
 
     async def _resume_reimplement(
@@ -1207,7 +1385,7 @@ class Application:
         planning_outcome: PlanningOutcome,
         plan_markdown: str,
         task_profile: TaskProfile,
-        user_override: ModelRef | None,
+        role_override: RoleOverride | None,
         worktree_existed: bool,
     ) -> tuple[RoutingDecision, ImplementationOutcome]:
         """Recreate a worktree with no durable changes and re-run implementation from scratch.
@@ -1236,7 +1414,7 @@ class Application:
             "Resumed: no prior implementation changes found; restarting implementation",
         )
 
-        decision = self._route_and_persist(planning_outcome, ctx, user_override)
+        decision = self._route_and_persist(planning_outcome, ctx, role_override)
         implementation_workflow = ImplementationWorkflow(
             self.db_manager, self.agent_registry, worktree_manager, self.ui
         )

@@ -12,6 +12,7 @@ from agentflow.errors import PersistenceError
 from agentflow.persistence.migrations import apply_migrations
 from agentflow.persistence.models import (
     AgentSessionRecord,
+    CliAvailabilityRecord,
     DecisionRecord,
     EventRecord,
     ProjectRecord,
@@ -150,6 +151,39 @@ class DatabaseManager:
                 config_hash=row["config_hash"],
                 created_at=datetime.fromisoformat(row["created_at"]),
                 last_used_at=datetime.fromisoformat(row["last_used_at"]),
+            )
+
+    def get_cli_availability(self, provider: str) -> CliAvailabilityRecord | None:
+        """Retrieve the most recently recorded `doctor` check for one provider CLI."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM cli_availability WHERE provider = ?;", (provider,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return CliAvailabilityRecord(
+                provider=row["provider"],
+                command=row["command"],
+                available=bool(row["available"]),
+                last_checked_at=datetime.fromisoformat(row["last_checked_at"]),
+            )
+
+    def upsert_cli_availability(
+        self, provider: str, command: str, available: bool, checked_at: str
+    ) -> None:
+        """Record the outcome of the latest `doctor` check for one provider CLI."""
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO cli_availability (provider, command, available, last_checked_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    command = excluded.command,
+                    available = excluded.available,
+                    last_checked_at = excluded.last_checked_at;
+                """,
+                (provider, command, int(available), checked_at),
             )
 
     def list_projects(self) -> list[ProjectRecord]:

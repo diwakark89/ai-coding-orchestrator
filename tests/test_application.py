@@ -1,10 +1,12 @@
 """Unit tests for Application orchestration and Doctor checks."""
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentflow.application import Application, DoctorCheckItem, DoctorReport
 from agentflow.config.models import GlobalConfig
 from agentflow.persistence.database import DatabaseManager
+from agentflow.process.executor import ProcessResult
 
 
 def test_doctor_report_exit_code():
@@ -48,6 +50,78 @@ def test_application_doctor_run(tmp_path: Path):
     # Storage check must pass in tmp_path
     storage_check = next(i for i in report.items if i.name == "Global data storage")
     assert storage_check.passed is True
+
+
+def _isolated_config(tmp_path: Path) -> GlobalConfig:
+    return GlobalConfig.model_validate(
+        {
+            "version": 1,
+            "storage": {"database": str(tmp_path / "app.db")},
+            "worktrees": {"root": str(tmp_path / "worktrees")},
+            "logging": {"root": str(tmp_path / "logs")},
+        }
+    )
+
+
+def test_check_cli_persists_availability(tmp_path: Path, monkeypatch):
+    """check_cli persists its result so a later call can compare against it."""
+    app = Application(config=_isolated_config(tmp_path))
+    app.initialize()
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/claude")
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        app.executor,
+        "run_sync",
+        lambda *a, **k: ProcessResult(
+            command=["claude", "--version"],
+            exit_code=0,
+            stdout="claude 1.0.0",
+            stderr="",
+            started_at=now,
+            completed_at=now,
+        ),
+    )
+
+    result = app.check_cli("Claude", "claude")
+
+    assert result.passed is True
+    assert result.regressed is False
+    record = app.db_manager.get_cli_availability("Claude")
+    assert record is not None
+    assert record.available is True
+    assert record.command == "claude"
+
+
+def test_check_cli_flags_regression_when_previously_available(tmp_path: Path, monkeypatch):
+    """A CLI available on a prior check that's now missing is flagged as regressed."""
+    app = Application(config=_isolated_config(tmp_path))
+    app.initialize()
+    app.db_manager.upsert_cli_availability(
+        "Claude", "claude", True, datetime.now(timezone.utc).isoformat()
+    )
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+
+    result = app.check_cli("Claude", "claude")
+
+    assert result.passed is False
+    assert result.regressed is True
+    assert "Previously available" in result.details
+    record = app.db_manager.get_cli_availability("Claude")
+    assert record is not None
+    assert record.available is False
+
+
+def test_check_cli_first_time_missing_is_not_regressed(tmp_path: Path, monkeypatch):
+    """A CLI missing on its very first check is a plain warning, not a regression."""
+    app = Application(config=_isolated_config(tmp_path))
+    app.initialize()
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+
+    result = app.check_cli("Codex", "codex")
+
+    assert result.passed is False
+    assert result.regressed is False
+    assert result.is_warning is True
 
 
 def test_application_status_message(tmp_path: Path):

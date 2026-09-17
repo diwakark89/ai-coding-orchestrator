@@ -165,12 +165,26 @@ MIGRATION_005_LOCAL_OBSERVABILITY = Migration(
     """,
 )
 
+MIGRATION_006_CLI_AVAILABILITY = Migration(
+    version=6,
+    name="cli_availability",
+    sql="""
+    CREATE TABLE IF NOT EXISTS cli_availability (
+        provider TEXT PRIMARY KEY,
+        command TEXT NOT NULL,
+        available INTEGER NOT NULL,
+        last_checked_at TEXT NOT NULL
+    );
+    """,
+)
+
 MIGRATIONS: Sequence[Migration] = [
     MIGRATION_001_INITIAL_SCHEMA,
     MIGRATION_002_WORKFLOW_PLANNING,
     MIGRATION_003_ROUTING_DECISIONS,
     MIGRATION_004_IMPLEMENTATION_VERIFICATION,
     MIGRATION_005_LOCAL_OBSERVABILITY,
+    MIGRATION_006_CLI_AVAILABILITY,
 ]
 
 

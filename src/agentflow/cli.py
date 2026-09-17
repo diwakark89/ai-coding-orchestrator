@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from agentflow import __version__
 from agentflow.application import Application
 from agentflow.errors import AgentFlowError, ProjectNotFoundError
-from agentflow.routing.rules import ModelRef
+from agentflow.routing.rules import ModelRef, RoleOverride
+from agentflow.task.profile import Stage
 from agentflow.ui.console import console
 from agentflow.workflow.states import WorkflowState
 
@@ -29,10 +30,24 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _build_user_override(
-    app_instance: Application, override_provider: str | None, override_model: str | None
-) -> ModelRef | None:
-    """Build a ModelRef from --override-provider/--override-model, or exit(1) on misuse."""
+_OVERRIDE_STAGE_CHOICES: dict[str, Stage] = {
+    "implementation": Stage.IMPLEMENTATION,
+    "review": Stage.REVIEW,
+    "documentation": Stage.DOCUMENTATION,
+}
+
+
+def _build_role_override(
+    app_instance: Application,
+    override_provider: str | None,
+    override_model: str | None,
+    override_stage: str | None,
+) -> RoleOverride | None:
+    """Build a RoleOverride from --override-provider/--override-model/--override-stage.
+
+    --override-stage defaults to "implementation" when omitted -- this is the one stage the
+    override has ever actually reached, so omitting the flag preserves prior behavior exactly.
+    """
     if not (override_provider or override_model):
         return None
     if not (override_provider and override_model):
@@ -40,11 +55,20 @@ def _build_user_override(
             "--override-provider and --override-model must both be provided together."
         )
         raise typer.Exit(code=1)
+    stage_key = (override_stage or "implementation").strip().lower()
+    stage = _OVERRIDE_STAGE_CHOICES.get(stage_key)
+    if stage is None:
+        app_instance.ui.print_error(
+            f"Invalid --override-stage '{override_stage}'. Expected one of: "
+            f"{', '.join(sorted(_OVERRIDE_STAGE_CHOICES))}."
+        )
+        raise typer.Exit(code=1)
     try:
-        return ModelRef(provider=override_provider, model=override_model)
+        model_ref = ModelRef(provider=override_provider, model=override_model)
     except ValidationError as e:
         app_instance.ui.print_error(f"Invalid model override: {e}")
         raise typer.Exit(code=1) from e
+    return RoleOverride(overrides={stage: model_ref})
 
 
 @app.callback()
@@ -94,6 +118,51 @@ def doctor_cmd(
     app_instance.render_doctor_report(report)
     if report.has_critical_failures:
         raise typer.Exit(code=1)
+
+
+@app.command(name="init")
+def init_cmd(
+    ctx: typer.Context,
+    project: Annotated[
+        Path | None,
+        typer.Option(
+            "--project",
+            "-C",
+            help="Target project directory path (overrides auto-discovery).",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite an existing .ai-orchestrator/routing.yaml."),
+    ] = False,
+) -> None:
+    """Generate a starter .ai-orchestrator/routing.yaml, seeded from detected project structure.
+
+    Detection is a heuristic starting point only -- always review the generated file before
+    running real tasks against it.
+    """
+    global_project = ctx.obj.get("project") if ctx.obj else None
+    target_project = project or global_project
+    app_instance = Application()
+    try:
+        result = app_instance.run_init(project_path=target_project, force=force)
+    except AgentFlowError as e:
+        app_instance.ui.print_error(str(e))
+        raise typer.Exit(code=1) from e
+
+    if result.detected_groups:
+        groups_text = ", ".join(result.detected_groups)
+        app_instance.ui.print_info(f"Detected verification groups: {groups_text}")
+    else:
+        app_instance.ui.print_info(
+            "No recognized project markers detected -- verification: left empty."
+        )
+    action = "Overwrote" if result.overwritten else "Wrote"
+    app_instance.ui.print_success(
+        f"{action} starter profile at {result.path}.\n"
+        "Review it -- especially the verification: commands and documentation: section -- "
+        "before running real tasks against this project."
+    )
 
 
 @app.command(name="status")
@@ -197,17 +266,29 @@ def route_cmd(
             help="Force a specific model, bypassing routing rules. Requires --override-provider.",
         ),
     ] = None,
+    override_stage: Annotated[
+        str | None,
+        typer.Option(
+            "--override-stage",
+            help=(
+                "Which stage the override applies to: implementation (default), review, "
+                "or documentation."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Classify a task and display its deterministic routing decision (no code changes)."""
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
-    user_override = _build_user_override(app_instance, override_provider, override_model)
+    role_override = _build_role_override(
+        app_instance, override_provider, override_model, override_stage
+    )
 
     try:
         outcome = asyncio.run(
             app_instance.run_routing(
-                task_description=task, project_path=target_project, user_override=user_override
+                task_description=task, project_path=target_project, role_override=role_override
             )
         )
     except AgentFlowError as e:
@@ -255,6 +336,16 @@ def implement_cmd(
             help="Force a specific model, bypassing routing rules. Requires --override-provider.",
         ),
     ] = None,
+    override_stage: Annotated[
+        str | None,
+        typer.Option(
+            "--override-stage",
+            help=(
+                "Which stage the override applies to: implementation (default), review, "
+                "or documentation."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Plan, route, implement in an isolated worktree, then verify and repair.
 
@@ -264,12 +355,14 @@ def implement_cmd(
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
-    user_override = _build_user_override(app_instance, override_provider, override_model)
+    role_override = _build_role_override(
+        app_instance, override_provider, override_model, override_stage
+    )
 
     try:
         outcome = asyncio.run(
             app_instance.run_implementation(
-                task_description=task, project_path=target_project, user_override=user_override
+                task_description=task, project_path=target_project, role_override=role_override
             )
         )
     except AgentFlowError as e:
@@ -329,6 +422,16 @@ def complete_cmd(
             help="Force a specific model, bypassing routing rules. Requires --override-provider.",
         ),
     ] = None,
+    override_stage: Annotated[
+        str | None,
+        typer.Option(
+            "--override-stage",
+            help=(
+                "Which stage the override applies to: implementation (default), review, "
+                "or documentation."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the full pipeline: plan, route, implement, verify/repair, review, document, approve.
 
@@ -337,12 +440,14 @@ def complete_cmd(
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
-    user_override = _build_user_override(app_instance, override_provider, override_model)
+    role_override = _build_role_override(
+        app_instance, override_provider, override_model, override_stage
+    )
 
     try:
         outcome = asyncio.run(
             app_instance.run_pipeline(
-                task_description=task, project_path=target_project, user_override=user_override
+                task_description=task, project_path=target_project, role_override=role_override
             )
         )
     except AgentFlowError as e:
@@ -395,21 +500,37 @@ def resume_cmd(
             help="Force a specific model, bypassing routing rules. Requires --override-provider.",
         ),
     ] = None,
+    override_stage: Annotated[
+        str | None,
+        typer.Option(
+            "--override-stage",
+            help=(
+                "Which stage the override applies to: implementation (default), review, "
+                "or documentation. Check `agentflow runs`/`status` for the Stage a BLOCKED "
+                "run was in and pass that here, or the override won't reach it."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Resume a run interrupted by a crash: inspect persisted state and continue safely.
+    """Resume a run interrupted by a crash, or a BLOCKED run, and continue it safely.
 
-    Reuses any existing worktree changes rather than blindly redoing completed work, and
-    refuses to resume a run still actively controlled by another live process.
+    Reuses any existing worktree changes rather than blindly redoing completed work. A BLOCKED
+    run (e.g. a coding-agent CLI hit a usage limit) is retried from the stage it was in when it
+    blocked -- pass --override-provider/--override-model (and --override-stage matching that
+    stage) to route the retry elsewhere. Refuses to resume a run still actively controlled by
+    another live process, or one that already ended in COMPLETED/FAILED/CANCELLED.
     """
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
-    user_override = _build_user_override(app_instance, override_provider, override_model)
+    role_override = _build_role_override(
+        app_instance, override_provider, override_model, override_stage
+    )
 
     try:
         outcome = asyncio.run(
             app_instance.run_resume(
-                run_id, project_path=target_project, user_override=user_override
+                run_id, project_path=target_project, role_override=role_override
             )
         )
     except AgentFlowError as e:

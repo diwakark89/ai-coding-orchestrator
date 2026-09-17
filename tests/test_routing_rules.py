@@ -11,7 +11,9 @@ from agentflow.routing.rules import (
     ComplexityRule,
     ComplexityRuleWhen,
     ModelRef,
+    RoleOverride,
 )
+from agentflow.task.profile import Stage
 
 
 def test_model_ref_resolves_provider_enum():
@@ -55,6 +57,28 @@ def test_complexity_rule_when_rejects_invalid_level():
     """ComplexityRuleWhen rejects a complexity value outside low/medium/high."""
     with pytest.raises(ValidationError):
         ComplexityRuleWhen(complexity="extreme")
+
+
+def test_role_override_for_stage_returns_matching_override():
+    """RoleOverride.for_stage returns the ModelRef registered for that stage."""
+    ref = ModelRef(provider="openai", model="GPT-5.6 Terra")
+    override = RoleOverride(overrides={Stage.IMPLEMENTATION: ref})
+    assert override.for_stage(Stage.IMPLEMENTATION) == ref
+
+
+def test_role_override_for_stage_returns_none_when_unscoped():
+    """RoleOverride.for_stage returns None for a stage that wasn't overridden."""
+    ref = ModelRef(provider="openai", model="GPT-5.6 Terra")
+    override = RoleOverride(overrides={Stage.IMPLEMENTATION: ref})
+    assert override.for_stage(Stage.REVIEW) is None
+    assert override.for_stage(Stage.DOCUMENTATION) is None
+    assert override.for_stage(Stage.PLANNING) is None
+
+
+def test_role_override_defaults_to_empty():
+    """A RoleOverride constructed with no overrides scopes to nothing."""
+    override = RoleOverride()
+    assert override.for_stage(Stage.IMPLEMENTATION) is None
 
 
 def test_complexity_rule_when_normalizes_case():

@@ -14,7 +14,12 @@ from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
 from agentflow.routing.complexity import ComplexityLevel
 from agentflow.routing.decision import RoutingDecision
-from agentflow.routing.rules import DEFAULT_MODELS_CONFIG, DEFAULT_ROUTING_RULES
+from agentflow.routing.rules import (
+    DEFAULT_MODELS_CONFIG,
+    DEFAULT_ROUTING_RULES,
+    ModelRef,
+    RoleOverride,
+)
 from agentflow.task.profile import Stage, TaskProfile
 from agentflow.workflow.review import ReviewFinding, ReviewWorkflow, mandatory_findings
 from agentflow.workflow.states import WorkflowState
@@ -231,6 +236,45 @@ async def test_deep_review_selected_for_authentication_risk(git_repo: Path, tmp_
 
     assert outcome.state == WorkflowState.REVIEW_APPROVED
     assert outcome.reviewer_model == "Claude Sonnet 5"
+
+
+@pytest.mark.asyncio
+async def test_role_override_for_review_bypasses_default_routing(git_repo: Path, tmp_path: Path):
+    """A RoleOverride targeting REVIEW routes there regardless of task risk flags."""
+    db, ctx, task_profile, worktree_manager, worktree_path = await make_environment(
+        git_repo, tmp_path
+    )
+    registry = AgentAdapterRegistry()
+    registry.register(
+        Provider.OPENAI,
+        ScriptedAdapter(Provider.OPENAI, [make_result(review_payload("APPROVED"))]),
+    )
+    override = RoleOverride(
+        overrides={Stage.REVIEW: ModelRef(provider="openai", model="GPT-5.6 Terra")}
+    )
+
+    workflow = ReviewWorkflow(
+        db,
+        registry,
+        ScriptedVerificationRunner([]),
+        worktree_manager,
+        DEFAULT_MODELS_CONFIG,
+        DEFAULT_ROUTING_RULES,
+        role_override=override,
+    )
+    outcome = await workflow.run(
+        "run_1",
+        worktree_path,
+        ctx,
+        "# Plan",
+        task_profile,
+        None,
+        make_implementation_decision(),
+        passed_verification(),
+    )
+
+    assert outcome.state == WorkflowState.REVIEW_APPROVED
+    assert outcome.reviewer_model == "GPT-5.6 Terra"
 
 
 @pytest.mark.asyncio

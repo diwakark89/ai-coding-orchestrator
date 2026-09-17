@@ -13,6 +13,10 @@ class ProjectNotFoundError(AgentFlowError):
     """Raised when a specified or discovered project repository cannot be found."""
 
 
+class InitError(AgentFlowError):
+    """Raised when `agentflow init` cannot safely generate a starter project profile."""
+
+
 class ProcessExecutionError(AgentFlowError):
     """Raised when safe subprocess execution fails unexpectedly."""
 

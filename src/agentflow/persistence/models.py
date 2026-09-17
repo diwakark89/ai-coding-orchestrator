@@ -130,6 +130,17 @@ class VerificationRunRecord(BaseModel):
     completed_at: datetime
 
 
+class CliAvailabilityRecord(BaseModel):
+    """Database record of the most recent `agentflow doctor` check for one provider CLI."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: str
+    command: str
+    available: bool
+    last_checked_at: datetime
+
+
 class EventRecord(BaseModel):
     """A safe, structured local observability event for a workflow run."""
 

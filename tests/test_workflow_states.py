@@ -116,6 +116,28 @@ def test_invalid_transition_skips_final_approval():
         validate_transition(WorkflowState.REVIEW_APPROVED, WorkflowState.COMPLETED)
 
 
+def test_valid_documentation_pipeline():
+    """REVIEW_APPROVED -> DOCUMENTING -> READY_FOR_APPROVAL is legal when docs run."""
+    validate_transition(WorkflowState.REVIEW_APPROVED, WorkflowState.DOCUMENTING)
+    validate_transition(WorkflowState.DOCUMENTING, WorkflowState.READY_FOR_APPROVAL)
+
+
+def test_valid_documentation_skip_still_legal():
+    """REVIEW_APPROVED -> READY_FOR_APPROVAL stays legal when documentation is skipped."""
+    validate_transition(WorkflowState.REVIEW_APPROVED, WorkflowState.READY_FOR_APPROVAL)
+
+
+def test_valid_documentation_blocked():
+    """DOCUMENTING may transition to BLOCKED if the documentation agent fails."""
+    validate_transition(WorkflowState.DOCUMENTING, WorkflowState.BLOCKED)
+
+
+def test_invalid_transition_skips_documenting_and_approval():
+    """REVIEWING cannot jump directly to DOCUMENTING, skipping REVIEW_APPROVED."""
+    with pytest.raises(InvalidStateTransitionError):
+        validate_transition(WorkflowState.REVIEWING, WorkflowState.DOCUMENTING)
+
+
 def test_transition_run_state_persists_and_validates(tmp_path: Path):
     """transition_run_state validates against the run's current state and persists the change."""
     db = DatabaseManager(tmp_path / "test.db")

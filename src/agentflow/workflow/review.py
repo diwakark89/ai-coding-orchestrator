@@ -31,7 +31,7 @@ from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
 from agentflow.routing.decision import RoutingDecision
 from agentflow.routing.engine import route
-from agentflow.routing.rules import ModelsConfig, RoutingRulesConfig
+from agentflow.routing.rules import ModelsConfig, RoleOverride, RoutingRulesConfig
 from agentflow.task.profile import Stage, TaskProfile
 from agentflow.ui.console import ConsoleUI
 from agentflow.workflow.states import WorkflowState, transition_run_state
@@ -177,6 +177,7 @@ class ReviewWorkflow:
         limits: LimitsConfig | None = None,
         console_ui: ConsoleUI | None = None,
         max_malformed_retries: int = 2,
+        role_override: RoleOverride | None = None,
     ) -> None:
         self.db_manager = db_manager
         self.agent_registry = agent_registry
@@ -187,6 +188,7 @@ class ReviewWorkflow:
         self.limits = limits or LimitsConfig()
         self.ui = console_ui or ConsoleUI()
         self.max_malformed_retries = max_malformed_retries
+        self.role_override = role_override
 
     async def run(
         self,
@@ -208,7 +210,12 @@ class ReviewWorkflow:
         while True:
             cycle += 1
             decision = route(
-                review_profile, models=self.models_config, routing_rules=self.routing_rules
+                review_profile,
+                models=self.models_config,
+                routing_rules=self.routing_rules,
+                user_override=(
+                    self.role_override.for_stage(Stage.REVIEW) if self.role_override else None
+                ),
             )
             self.db_manager.record_routing_decision(
                 str(uuid.uuid4()),

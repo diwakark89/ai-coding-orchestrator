@@ -18,10 +18,11 @@ from agentflow.observability.events import record_agent_completed, record_agent_
 from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
 from agentflow.routing.engine import route
-from agentflow.routing.rules import ModelsConfig, RoutingRulesConfig
+from agentflow.routing.rules import ModelsConfig, RoleOverride, RoutingRulesConfig
 from agentflow.task.profile import Stage, TaskProfile
 from agentflow.ui.console import ConsoleUI
 from agentflow.workflow.review import ReviewFinding
+from agentflow.workflow.states import WorkflowState
 from agentflow.workflow.verification import VerificationResult, VerificationRunnerLike
 
 
@@ -77,6 +78,7 @@ class DocumentationWorkflow:
         models_config: ModelsConfig,
         routing_rules: RoutingRulesConfig,
         console_ui: ConsoleUI | None = None,
+        role_override: RoleOverride | None = None,
     ) -> None:
         self.db_manager = db_manager
         self.agent_registry = agent_registry
@@ -85,6 +87,7 @@ class DocumentationWorkflow:
         self.models_config = models_config
         self.routing_rules = routing_rules
         self.ui = console_ui or ConsoleUI()
+        self.role_override = role_override
 
     async def run(
         self,
@@ -105,7 +108,14 @@ class DocumentationWorkflow:
             return DocumentationOutcome(enabled=False)
 
         doc_profile = task_profile.model_copy(update={"stage": Stage.DOCUMENTATION})
-        decision = route(doc_profile, models=self.models_config, routing_rules=self.routing_rules)
+        decision = route(
+            doc_profile,
+            models=self.models_config,
+            routing_rules=self.routing_rules,
+            user_override=(
+                self.role_override.for_stage(Stage.DOCUMENTATION) if self.role_override else None
+            ),
+        )
         self.db_manager.record_routing_decision(
             str(uuid.uuid4()),
             run_id,
@@ -139,7 +149,11 @@ class DocumentationWorkflow:
                 read_only=False,
             )
             record_agent_started(
-                self.db_manager, run_id, "DOCUMENTING", adapter.provider.value, decision.model
+                self.db_manager,
+                run_id,
+                WorkflowState.DOCUMENTING.value,
+                adapter.provider.value,
+                decision.model,
             )
             result = await adapter.start(request)
         finally:
@@ -148,12 +162,12 @@ class DocumentationWorkflow:
         self.db_manager.record_agent_session(
             str(uuid.uuid4()),
             run_id,
-            "DOCUMENTING",
+            WorkflowState.DOCUMENTING.value,
             adapter.provider.value,
             decision.model,
             result.session_id,
         )
-        record_agent_completed(self.db_manager, run_id, "DOCUMENTING", result)
+        record_agent_completed(self.db_manager, run_id, WorkflowState.DOCUMENTING.value, result)
 
         if not result.success:
             detail = result.stderr.strip() or result.text.strip() or "no output"
