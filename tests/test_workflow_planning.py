@@ -16,6 +16,14 @@ from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.persistence.database import DatabaseManager
 from agentflow.persistence.models import RunStatus
 from agentflow.project.context import ProjectContext
+from agentflow.routing.rules import (
+    DEFAULT_MODELS_CONFIG,
+    DEFAULT_ROUTING_RULES,
+    ModelRef,
+    ModelsConfig,
+    PlannerModels,
+    RoutingRulesConfig,
+)
 from agentflow.task.profile import Stage
 from agentflow.ui.approval import ApprovalDecision
 from agentflow.workflow.planning import PlanningWorkflow
@@ -25,13 +33,16 @@ from agentflow.workflow.states import WorkflowState
 class ScriptedAdapter:
     """Fake AgentAdapter returning a pre-scripted sequence of AgentResults."""
 
-    def __init__(self, responses: list[AgentResult]) -> None:
+    def __init__(
+        self, responses: list[AgentResult], provider: Provider = Provider.ANTHROPIC
+    ) -> None:
         self._responses = list(responses)
+        self._provider = provider
         self.calls: list[tuple[str, AgentRequest, str | None]] = []
 
     @property
     def provider(self) -> Provider:
-        return Provider.ANTHROPIC
+        return self._provider
 
     @property
     def capabilities(self) -> AdapterCapabilities:
@@ -56,11 +67,12 @@ def make_result(
     session_id: str | None = "sess-1",
     exit_code: int = 0,
     stderr: str = "",
+    provider: Provider = Provider.ANTHROPIC,
 ) -> AgentResult:
     """Build a minimal AgentResult carrying the given planner turn text."""
     now = datetime.now(timezone.utc)
     return AgentResult(
-        provider=Provider.ANTHROPIC,
+        provider=provider,
         model="sonnet",
         session_id=session_id,
         exit_code=exit_code,
@@ -97,16 +109,29 @@ def make_workflow(
     feedback_prompt=None,
     max_malformed_retries: int = 2,
     max_turns: int = 12,
+    models_config: ModelsConfig | None = None,
+    routing_rules: RoutingRulesConfig | None = None,
+    extra_adapters: dict[Provider, ScriptedAdapter] | None = None,
 ) -> tuple[PlanningWorkflow, DatabaseManager, ProjectContext]:
-    """Construct a PlanningWorkflow wired to an in-memory DB and a scripted adapter."""
+    """Construct a PlanningWorkflow wired to an in-memory DB and a scripted adapter.
+
+    Registers `adapter` under whichever provider it reports (`DEFAULT_MODELS_CONFIG`'s
+    `planner.default`/`.architecture` are both Anthropic, matching `ScriptedAdapter`'s own
+    default, so existing tests are unaffected). `extra_adapters` registers additional adapters
+    under other providers, e.g. for tests exercising a cross-provider escalation.
+    """
     db = DatabaseManager(":memory:")
     db.initialize()
     registry = AgentAdapterRegistry()
-    registry.register(Provider.ANTHROPIC, adapter)
+    registry.register(adapter.provider, adapter)
+    for provider, extra_adapter in (extra_adapters or {}).items():
+        registry.register(provider, extra_adapter)
     ctx = ProjectContext(root_path=tmp_path, project_id="proj-1", project_name="demo-project")
     workflow = PlanningWorkflow(
         db_manager=db,
         agent_registry=registry,
+        models_config=models_config or DEFAULT_MODELS_CONFIG,
+        routing_rules=routing_rules or DEFAULT_ROUTING_RULES,
         question_prompt=question_prompt or (lambda q: "unused"),
         approval_prompt=approval_prompt or (lambda: ApprovalDecision.APPROVE),
         feedback_prompt=feedback_prompt or (lambda: "unused"),
@@ -348,3 +373,73 @@ async def test_plan_ready_missing_task_profile_blocks_run(tmp_path: Path):
     outcome = await workflow.run("Add a feature", ctx)
 
     assert outcome.state == WorkflowState.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_planning_routes_to_configured_non_anthropic_provider(tmp_path: Path):
+    """Planning is no longer hardcoded to Anthropic: routing.yaml's models.planner.default is
+    honored, so a Codex-only (or Gemini-only) setup can plan tasks too."""
+    openai_models = DEFAULT_MODELS_CONFIG.model_copy(
+        update={
+            "planner": PlannerModels(
+                default=ModelRef(provider="openai", model="GPT-5.6 Terra"),
+                architecture=ModelRef(provider="openai", model="GPT-5.6 Terra"),
+            )
+        }
+    )
+    adapter = ScriptedAdapter([make_result(plan_ready_payload())], provider=Provider.OPENAI)
+    workflow, db, ctx = make_workflow(tmp_path, adapter, models_config=openai_models)
+
+    outcome = await workflow.run("Add a feature", ctx)
+
+    assert outcome.state == WorkflowState.TASK_CLASSIFIED
+    sessions = db.list_agent_sessions(outcome.run_id)
+    assert sessions[0].provider == "openai"
+    assert sessions[0].model == "GPT-5.6 Terra"
+
+
+@pytest.mark.asyncio
+async def test_cross_provider_escalation_switches_adapter_and_drops_session(tmp_path: Path):
+    """Escalating to a *different* provider than the default re-fetches the right adapter and
+    starts a fresh session, rather than trying to resume a session ID that CLI never issued."""
+    mixed_models = DEFAULT_MODELS_CONFIG.model_copy(
+        update={
+            "planner": PlannerModels(
+                default=ModelRef(provider="openai", model="GPT-5.6 Terra"),
+                architecture=ModelRef(provider="anthropic", model="Claude Opus 5"),
+            )
+        }
+    )
+    escalation_payload = json.dumps(
+        {
+            "status": "questions",
+            "questions": [{"question": "Confirm new service?", "options": ["Yes", "No"]}],
+            "escalation": {"flags": ["new_service"], "reason": "New billing service"},
+        }
+    )
+    openai_adapter = ScriptedAdapter(
+        [make_result(escalation_payload, session_id="openai-sess")], provider=Provider.OPENAI
+    )
+    anthropic_adapter = ScriptedAdapter(
+        [make_result(plan_ready_payload(architecture_change=True), session_id="claude-sess")],
+        provider=Provider.ANTHROPIC,
+    )
+    workflow, db, ctx = make_workflow(
+        tmp_path,
+        openai_adapter,
+        models_config=mixed_models,
+        question_prompt=lambda q: "Yes",
+        extra_adapters={Provider.ANTHROPIC: anthropic_adapter},
+    )
+
+    outcome = await workflow.run("Split billing into its own service", ctx)
+
+    assert outcome.state == WorkflowState.TASK_CLASSIFIED
+    # The escalated turn went to the Anthropic adapter, as a fresh `start` (no session to resume).
+    assert len(anthropic_adapter.calls) == 1
+    call_kind, _request, session_id = anthropic_adapter.calls[0]
+    assert call_kind == "start"
+    assert session_id is None
+    sessions = db.list_agent_sessions(outcome.run_id)
+    assert sessions[-1].provider == "anthropic"
+    assert sessions[-1].model == "Claude Opus 5"

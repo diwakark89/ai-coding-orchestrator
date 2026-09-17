@@ -17,8 +17,8 @@ AgentFlow coordinates locally installed coding-agent CLIs (Claude Code, OpenAI C
 - **Documentation & Completion:** Post-verification documentation sync and human approval.
 
 ### Primary References
-- **Implementation Blueprint:** [phased-implementation-plan.md](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/phased-implementation-plan.md) — Step-by-step phased instructions, milestone definitions, and test criteria.
-- **Technical Architecture:** [technical-design-document.md](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md) — Comprehensive technical design, schemas, state machine, and data flow.
+- **Implementation Blueprint:** [phased-implementation-plan.md](phased-implementation-plan.md) — Step-by-step phased instructions, milestone definitions, and test criteria.
+- **Technical Architecture:** [technical-design-document.md](technical-design-document.md) — Comprehensive technical design, schemas, state machine, and data flow.
 
 ---
 
@@ -38,7 +38,7 @@ Every agent working on this codebase must adhere to the following rules without 
 
 3. **Deterministic Model Routing:**
    - AI models must never decide which model executes the next stage.
-   - Routing is calculated deterministically from the Pydantic `TaskProfile` and `.ai-orchestrator/routing.yaml` using exact precedence rules (see [technical-design-document.md#18](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L749-L764)).
+   - Routing is calculated deterministically from the Pydantic `TaskProfile` and `.ai-orchestrator/routing.yaml` using exact precedence rules (see [technical-design-document.md](technical-design-document.md) §18).
 
 4. **Strict V1 Model Pool:**
    - Permitted models: `Claude Sonnet 5`, `Claude Opus 5`, `GPT-5.6 Luna`, `GPT-5.6 Terra`, `Gemini 3.8 Flash`.
@@ -55,6 +55,10 @@ Every agent working on this codebase must adhere to the following rules without 
 7. **Zero Shell Concatenation:**
    - Never execute commands via `shell=True` or concatenate user/task strings into shell commands.
    - All subprocess calls must use `asyncio.create_subprocess_exec()` with structured argument lists.
+
+8. **Relative Paths in Documentation:**
+   - Any doc in this repo (`AGENTS.md`, `README.md`, or anything an agent writes/edits) must reference other repo files with **relative paths only** — never absolute filesystem paths (`C:\...`, `/home/...`) or `file:///` URIs.
+   - Absolute paths break for every other clone, machine, and OS.
 
 ---
 
@@ -106,43 +110,7 @@ agentflow doctor
 
 ## 4. Repository Structure & Module Architecture
 
-When implementing modules, adhere to the logical package architecture defined in [technical-design-document.md#38](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L1677-L1747):
-
-```text
-ai-coding-orchestrator/
-├── pyproject.toml              # Single project packaging, dependencies, scripts
-├── README.md                   # Project overview and quickstart
-├── AGENTS.md                   # This instruction file
-├── technical-design-document.md# Complete technical design
-├── phased-implementation-plan.md# Phased milestone delivery plan
-└── src/
-    └── agentflow/
-        ├── __init__.py
-        ├── cli.py              # Typer CLI entry points (doctor, run, resume, route, status)
-        ├── application.py      # App lifecycle, DI container, and orchestration core
-        ├── config/             # Global (~/.agentflow/config.yaml) & project (.ai-orchestrator/routing.yaml)
-        ├── project/            # Git repo root discovery and canonical project identity (SHA-256)
-        ├── task/               # TaskProfile schema, task analyzer, and complexity scoring
-        ├── routing/            # Deterministic routing engine, rule matcher, and decision contract
-        ├── agents/             # Provider-independent AgentAdapter abstraction and CLI adapters
-        │   ├── base.py         # AgentRequest, AgentResult, AgentAdapter protocol
-        │   ├── claude.py       # ClaudeAdapter (Claude Code CLI)
-        │   ├── codex.py        # CodexAdapter (OpenAI Codex CLI)
-        │   └── gemini.py       # GeminiAdapter (Gemini CLI)
-        ├── workflow/           # State machine, engine, and stage coordinators
-        │   ├── states.py       # WorkflowState enum and transitions
-        │   ├── engine.py       # Orchestration loop and crash-recovery handlers
-        │   ├── planning.py     # Interactive Claude Sonnet/Opus planning workflow
-        │   ├── implementation.py # Codex worktree implementation coordinator
-        │   ├── verification.py # Build, test, and lint execution
-        │   ├── repair.py       # Bounded repair and model escalation loops
-        │   ├── review.py       # Gemini independent review coordinator
-        │   └── documentation.py# Post-verification documentation sync
-        ├── process/            # Safe subprocess execution (asyncio.create_subprocess_exec)
-        ├── git/                # Git worktree manager, branch creation, diff capture
-        ├── persistence/        # SQLite migrations, run/stage/decision entities (~/.agentflow/agentflow.db)
-        └── ui/                 # Rich console output, interactive question prompts, plan approval
-```
+Code lives under `src/agentflow/`, organized by responsibility (`config/`, `project/`, `task/`, `routing/`, `agents/`, `workflow/`, `process/`, `git/`, `persistence/`, `observability/`, `concurrency/`, `ui/`). This mirrors the logical package architecture defined in [technical-design-document.md](technical-design-document.md) — read that doc's module architecture section rather than relying on a tree here, since the actual layout is always the source of truth.
 
 > [!NOTE]
 > Do not create empty placeholder files or modules for future phases until the active milestone requires them.
@@ -151,7 +119,7 @@ ai-coding-orchestrator/
 
 ## 5. Phased Delivery Protocol & Verification Gates
 
-Implementation is organized into **8 Milestones** spanning **11 Phases** (detailed in [phased-implementation-plan.md#2221](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/phased-implementation-plan.md#L2221-L2254)).
+Implementation is organized into **8 Milestones** spanning **11 Phases** (full detail in [phased-implementation-plan.md](phased-implementation-plan.md)).
 
 ### Milestone Roadmap
 
@@ -180,27 +148,23 @@ Implementation is organized into **8 Milestones** spanning **11 Phases** (detail
 
 ## 6. Orchestrated Agents & Deterministic Routing Reference
 
-AgentFlow orchestrates three CLI toolsets. The coding agent should reference the comprehensive specifications in the architectural documents:
+AgentFlow orchestrates three CLI toolsets. Full specs for every role and schema below: [technical-design-document.md](technical-design-document.md) §13–§27.
 
 ### 1. Agent Roles & V1 Model Allocations
-| Role | Assigned Model | Provider CLI | Purpose & Trigger | Details |
-| :--- | :--- | :--- | :--- | :--- |
-| **Default Planner** | `Claude Sonnet 5` | `claude` | Interactive repository analysis, question loop, plan creation | [TDD §13.1](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L528-L547) |
-| **Architecture Planner** | `Claude Opus 5` | `claude` | Escalated planning for architecture changes, new services, datastores, payments | [TDD §13.2](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L549-L564) |
-| **Lightweight Coder** | `GPT-5.6 Luna` | `codex` | Low complexity (score 0–2), no hard risks | [TDD §19](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L766-L793) |
-| **Standard / High Coder**| `GPT-5.6 Terra` | `codex` | Medium/high complexity or any hard risk flag | [TDD §19](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L766-L793) |
-| **Implementation Escalation** | `Claude Sonnet 5` | `claude` | Repeated implementation or complex repair failures | [TDD §20](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L794-L820) |
-| **Default Reviewer** | `Gemini 3.8 Flash`| `gemini` | Fast, independent read-only diff inspection post-verification | [TDD §21](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L821-L847) |
-| **Deep Reviewer** | `Claude Sonnet 5` | `claude` | Deep inspection when security, auth, concurrency, or payments are modified | [TDD §21](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L821-L847) |
-| **Architecture Reviewer**| `Claude Opus 5` | `claude` | Structural review when `architecture_change = true` | [TDD §21](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L821-L847) |
-| **Documenter** | `Gemini 3.8 Flash`| `gemini` | Sync project docs (`architecture.md`, etc.) based on final diff | [TDD §22](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L848-L866) |
+| Role | Assigned Model | Provider CLI | Purpose & Trigger |
+| :--- | :--- | :--- | :--- |
+| **Default Planner** | `Claude Sonnet 5` | `claude` | Interactive repository analysis, question loop, plan creation |
+| **Architecture Planner** | `Claude Opus 5` | `claude` | Escalated planning for architecture changes, new services, datastores, payments |
+| **Lightweight Coder** | `GPT-5.6 Luna` | `codex` | Low complexity (score 0–2), no hard risks |
+| **Standard / High Coder**| `GPT-5.6 Terra` | `codex` | Medium/high complexity or any hard risk flag |
+| **Implementation Escalation** | `Claude Sonnet 5` | `claude` | Repeated implementation or complex repair failures |
+| **Default Reviewer** | `Gemini 3.8 Flash`| `gemini` | Fast, independent read-only diff inspection post-verification |
+| **Deep Reviewer** | `Claude Sonnet 5` | `claude` | Deep inspection when security, auth, concurrency, or payments are modified |
+| **Architecture Reviewer**| `Claude Opus 5` | `claude` | Structural review when `architecture_change = true` |
+| **Documenter** | `Gemini 3.8 Flash`| `gemini` | Sync project docs (`architecture.md`, etc.) based on final diff |
 
 ### 2. Core Schemas & Contracts
-Refer directly to the canonical schemas in the TDD:
-- **TaskProfile Schema:** [TDD §15](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L609-L652) (Stage, technologies, affected layers, boolean risk flags).
-- **Routing Decision Contract:** [TDD §24](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L1057-L1110) (Matched rule, complexity score, risk flags, provider/model).
-- **AgentRequest & AgentResult:** [TDD §26–27](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L1146-L1185) (Unified adapter interface protocol).
-- **Review Findings Schema:** [TDD §34](file:///c:/DK_World/IT/MyProjects/ai-coding-orchestrator/technical-design-document.md#L1403-L1443) (Severity: CRITICAL, HIGH, MEDIUM, LOW; mandatory vs optional fixes).
+Canonical schemas (`TaskProfile`, Routing Decision Contract, `AgentRequest`/`AgentResult`, Review Findings) are defined in the TDD — read them there rather than duplicating field lists here.
 
 ### 3. Deterministic Precedence Hierarchy
 When evaluating routing for any workflow stage:

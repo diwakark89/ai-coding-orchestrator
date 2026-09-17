@@ -1,7 +1,7 @@
 """Configuration data models for AgentFlow."""
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -30,13 +30,24 @@ class CLICommandConfig(BaseModel):
     command: str
 
 
+class GoogleCLIConfig(CLICommandConfig):
+    """Configuration for the Google-provider CLI.
+
+    `command` may point at the real `gemini` CLI or at Google's newer `agy` (Antigravity) CLI --
+    their non-interactive flag syntax differs enough to need distinct adapters, selected by
+    `dialect` rather than guessed from the binary's filename.
+    """
+
+    dialect: Literal["gemini", "antigravity"] = "gemini"
+
+
 class CLIsConfig(BaseModel):
     """Configuration for all supported provider CLIs."""
 
     model_config = ConfigDict(extra="ignore")
     claude: CLICommandConfig = Field(default_factory=lambda: CLICommandConfig(command="claude"))
     codex: CLICommandConfig = Field(default_factory=lambda: CLICommandConfig(command="codex"))
-    gemini: CLICommandConfig = Field(default_factory=lambda: CLICommandConfig(command="gemini"))
+    gemini: GoogleCLIConfig = Field(default_factory=lambda: GoogleCLIConfig(command="gemini"))
 
     @field_validator("claude", mode="before")
     @classmethod

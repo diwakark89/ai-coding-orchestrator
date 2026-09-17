@@ -5,10 +5,16 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentflow.agents.base import Provider
 from agentflow.application import Application
 from agentflow.config.models import GlobalConfig, ProjectConfig
 from agentflow.errors import InitError
-from agentflow.project.init import build_starter_config, detect_verification_groups
+from agentflow.project.init import (
+    build_models_config,
+    build_starter_config,
+    detect_verification_groups,
+)
+from agentflow.routing.rules import DEFAULT_MODELS_CONFIG
 
 
 def test_detect_verification_groups_root_marker(tmp_path: Path):
@@ -74,7 +80,7 @@ def test_build_starter_config_is_valid_project_config(tmp_path: Path):
     """build_starter_config produces a ProjectConfig that round-trips through validation."""
     (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
 
-    config = build_starter_config(tmp_path)
+    config = build_starter_config(tmp_path, {Provider.ANTHROPIC, Provider.OPENAI, Provider.GOOGLE})
 
     assert isinstance(config, ProjectConfig)
     assert config.project.name == tmp_path.name
@@ -107,12 +113,13 @@ def test_run_init_writes_starter_profile(tmp_path: Path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
 
-    result = _app(tmp_path).run_init(project_path=tmp_path)
+    result = _app(tmp_path).run_init(project_path=tmp_path, providers={Provider.ANTHROPIC})
 
     expected_path = tmp_path / ".ai-orchestrator" / "routing.yaml"
     assert result.path == expected_path
     assert expected_path.exists()
     assert result.overwritten is False
+    assert result.providers == ["anthropic"]
     assert "python" in result.detected_groups
 
     loaded = ProjectConfig.model_validate(yaml.safe_load(expected_path.read_text()))
@@ -129,7 +136,7 @@ def test_run_init_refuses_to_overwrite_without_force(tmp_path: Path):
     )
 
     with pytest.raises(InitError, match="already exists"):
-        _app(tmp_path).run_init(project_path=tmp_path)
+        _app(tmp_path).run_init(project_path=tmp_path, providers={Provider.ANTHROPIC})
 
     # The pre-existing file must be untouched.
     assert "existing" in (orch_dir / "routing.yaml").read_text()
@@ -144,8 +151,78 @@ def test_run_init_overwrites_with_force(tmp_path: Path):
         "version: 1\nproject:\n  name: existing\n", encoding="utf-8"
     )
 
-    result = _app(tmp_path).run_init(project_path=tmp_path, force=True)
+    result = _app(tmp_path).run_init(
+        project_path=tmp_path, force=True, providers={Provider.ANTHROPIC}
+    )
 
     assert result.overwritten is True
     loaded = ProjectConfig.model_validate(yaml.safe_load((orch_dir / "routing.yaml").read_text()))
     assert loaded.project.name == tmp_path.name
+
+
+def test_run_init_raises_when_no_providers_available_or_specified(tmp_path: Path, monkeypatch):
+    """agentflow init fails clearly rather than writing an unusable profile."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+
+    with pytest.raises(InitError, match="No coding-agent CLI detected"):
+        _app(tmp_path).run_init(project_path=tmp_path)
+
+
+def test_run_init_auto_detects_available_providers(tmp_path: Path, monkeypatch):
+    """Without --providers, agentflow init only uses CLIs actually found on PATH."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(
+        "shutil.which", lambda cmd: f"/usr/bin/{cmd}" if cmd == "claude" else None
+    )
+
+    result = _app(tmp_path).run_init(project_path=tmp_path)
+
+    assert result.providers == ["anthropic"]
+    loaded = ProjectConfig.model_validate(
+        yaml.safe_load((tmp_path / ".ai-orchestrator" / "routing.yaml").read_text())
+    )
+    assert loaded.models is not None
+    assert loaded.models.review.default.provider == "anthropic"
+
+
+def test_build_models_config_all_providers_matches_default():
+    """With every provider available, build_models_config reproduces DEFAULT_MODELS_CONFIG."""
+    config = build_models_config({Provider.ANTHROPIC, Provider.OPENAI, Provider.GOOGLE})
+    assert config == DEFAULT_MODELS_CONFIG
+
+
+def test_build_models_config_openai_only_avoids_other_providers():
+    """A Codex-only setup routes every role through openai -- nothing references an
+    unavailable provider, so every stage (including planning) can actually run."""
+    config = build_models_config({Provider.OPENAI})
+
+    for ref in (
+        config.planner.default,
+        config.planner.architecture,
+        config.implementation.lightweight,
+        config.implementation.standard,
+        config.implementation.escalation,
+        config.review.default,
+        config.review.deep,
+        config.review.architecture,
+        config.documentation.default,
+    ):
+        assert ref.provider == "openai"
+
+
+def test_build_models_config_claude_and_codex_falls_review_back_to_anthropic():
+    """Without google, review/documentation (normally google) fall back to anthropic."""
+    config = build_models_config({Provider.ANTHROPIC, Provider.OPENAI})
+
+    assert config.review.default.provider == "anthropic"
+    assert config.documentation.default.provider == "anthropic"
+    # Untouched roles keep their usual providers.
+    assert config.planner.default.provider == "anthropic"
+    assert config.implementation.lightweight.provider == "openai"
+
+
+def test_build_models_config_empty_providers_raises():
+    """build_models_config refuses to silently produce an unusable config."""
+    with pytest.raises(InitError):
+        build_models_config(set())

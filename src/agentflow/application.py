@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 from rich.table import Table
 
+from agentflow.agents.base import Provider
 from agentflow.agents.registry import AgentAdapterRegistry, create_default_registry
 from agentflow.concurrency.run_lock import RunLock
 from agentflow.config.loader import load_global_config
@@ -133,6 +134,7 @@ class InitResult:
     path: Path
     detected_groups: list[str] = field(default_factory=list)
     overwritten: bool = False
+    providers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -444,7 +446,7 @@ class Application:
         report.items.append(self.check_git())
         report.items.append(self.check_cli("Claude", self.config.cli.claude.command))
         report.items.append(self.check_cli("Codex", self.config.cli.codex.command))
-        report.items.append(self.check_cli("Gemini", self.config.cli.gemini.command))
+        report.items.append(self.check_cli("Antigravity/Gemini", self.config.cli.gemini.command))
         report.items.append(self.check_storage_writable())
         report.items.append(self.check_sqlite())
 
@@ -487,12 +489,32 @@ class Application:
         else:
             self.ui.print_success("All critical environment checks passed.")
 
-    def run_init(self, project_path: Path | None = None, force: bool = False) -> InitResult:
+    def _detect_available_providers(self) -> set[Provider]:
+        """Detect which coding-agent CLIs are actually on PATH, using each provider's
+        currently-configured command name (respects e.g. a `cli.gemini.command: agy` override)."""
+        found: set[Provider] = set()
+        if shutil.which(self.config.cli.claude.command):
+            found.add(Provider.ANTHROPIC)
+        if shutil.which(self.config.cli.codex.command):
+            found.add(Provider.OPENAI)
+        if shutil.which(self.config.cli.gemini.command):
+            found.add(Provider.GOOGLE)
+        return found
+
+    def run_init(
+        self,
+        project_path: Path | None = None,
+        force: bool = False,
+        providers: set[Provider] | None = None,
+    ) -> InitResult:
         """Generate a starter `.ai-orchestrator/routing.yaml` for a project.
 
         Detects common per-directory test setups (Node/Python/Java) as a starting point only --
         always review the generated file before running real tasks against it. Refuses to
-        overwrite an existing profile unless `force` is set.
+        overwrite an existing profile unless `force` is set. `providers` selects which coding-
+        agent CLIs the generated `models:` section may route to; if omitted, detects whichever
+        of claude/codex/gemini are actually on PATH so the profile is usable even when not all
+        three are installed.
         """
         ctx = discover_project(explicit_path=project_path)
         routing_path = ctx.root_path / ROUTING_CONFIG_RELATIVE_PATH
@@ -502,7 +524,17 @@ class Application:
                 f"{routing_path} already exists. Pass --force to overwrite it."
             )
 
-        config = build_starter_config(ctx.root_path)
+        resolved_providers = (
+            providers if providers is not None else self._detect_available_providers()
+        )
+        if not resolved_providers:
+            raise InitError(
+                "No coding-agent CLI detected (claude/codex/gemini) and none specified via "
+                "--providers; agentflow needs at least one to do anything. Install one, or "
+                "pass --providers explicitly."
+            )
+
+        config = build_starter_config(ctx.root_path, resolved_providers)
         routing_path.parent.mkdir(parents=True, exist_ok=True)
         routing_path.write_text(
             yaml.safe_dump(
@@ -515,6 +547,7 @@ class Application:
             path=routing_path,
             detected_groups=sorted(config.verification or {}),
             overwritten=already_existed,
+            providers=sorted(p.value for p in resolved_providers),
         )
 
     def get_status_message(self, project_path: Path | None = None) -> str:
@@ -542,15 +575,26 @@ class Application:
     async def run_planning(
         self, task_description: str, project_path: Path | None = None
     ) -> PlanningOutcome:
-        """Run interactive Claude-based planning for a task through TaskProfile generation."""
+        """Run interactive planning for a task through TaskProfile generation.
+
+        The planner's provider/model are read from the project's routing.yaml
+        (`models.planner.*`), not hardcoded to any one CLI.
+        """
         self.initialize()
         ctx = discover_project(explicit_path=project_path)
         run_id = f"RUN-{uuid.uuid4().hex[:8].upper()}"
         run_lock = RunLock(run_id, self._locks_root())
         run_lock.acquire()
+        routing_config = ctx.routing_config
+        models_cfg = (routing_config.models if routing_config else None) or DEFAULT_MODELS_CONFIG
+        routing_rules_cfg = (
+            routing_config.routing if routing_config else None
+        ) or DEFAULT_ROUTING_RULES
         workflow = PlanningWorkflow(
             db_manager=self.db_manager,
             agent_registry=self.agent_registry,
+            models_config=models_cfg,
+            routing_rules=routing_rules_cfg,
             console_ui=self.ui,
         )
         try:
@@ -1240,7 +1284,20 @@ class Application:
         run_dir = ctx.root_path / ".ai-orchestrator" / "runs" / run_id
 
         if current_state in _PLANNING_ONLY_STATES:
-            planning_workflow = PlanningWorkflow(self.db_manager, self.agent_registry, self.ui)
+            routing_config = ctx.routing_config
+            models_cfg = (
+                routing_config.models if routing_config else None
+            ) or DEFAULT_MODELS_CONFIG
+            routing_rules_cfg = (
+                routing_config.routing if routing_config else None
+            ) or DEFAULT_ROUTING_RULES
+            planning_workflow = PlanningWorkflow(
+                self.db_manager,
+                self.agent_registry,
+                models_cfg,
+                routing_rules_cfg,
+                self.ui,
+            )
             planning_outcome = await planning_workflow.resume(
                 run_id, persisted_task_description, ctx, current_state
             )

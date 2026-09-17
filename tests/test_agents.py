@@ -11,6 +11,7 @@ from agentflow.agents import (
     AgentRequest,
     AgentResult,
     AgentRole,
+    AntigravityAdapter,
     ClaudeAdapter,
     CodexAdapter,
     GeminiAdapter,
@@ -497,6 +498,110 @@ async def test_gemini_adapter_start_candidate_parsing(tmp_path: Path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# 5b. AntigravityAdapter Tests
+# ---------------------------------------------------------------------------
+
+
+def test_antigravity_adapter_capabilities():
+    """AntigravityAdapter has no read-only-mode equivalent flag, unlike GeminiAdapter."""
+    agy = AntigravityAdapter()
+    assert agy.provider == Provider.GOOGLE
+    assert agy.capabilities.supports_resume is True
+    assert agy.capabilities.supports_read_only_mode is False
+    assert agy.capabilities.supports_structured_output is True
+    assert agy.capabilities.supports_model_selection is True
+
+
+def test_antigravity_adapter_build_args_read_only(tmp_path: Path):
+    """AntigravityAdapter passes the prompt via -p and uses --sandbox for read-only requests."""
+    adapter = AntigravityAdapter(command="agy")
+    req = AgentRequest(
+        role=AgentRole.DEFAULT_REVIEWER,
+        prompt="Review diff",
+        repository_path=tmp_path,
+        model="Gemini 3.8 Flash",
+        read_only=True,
+    )
+    args = adapter.build_args(req)
+    assert args == [
+        "agy",
+        "-p",
+        "Review diff",
+        "--output-format",
+        "json",
+        "--model",
+        "gemini-3.8-flash",
+        "--sandbox",
+    ]
+
+
+def test_antigravity_adapter_build_args_unattended(tmp_path: Path):
+    """A non-read-only AntigravityAdapter request passes --dangerously-skip-permissions."""
+    adapter = AntigravityAdapter(command="agy")
+    req = AgentRequest(
+        role=AgentRole.IMPLEMENTER,
+        prompt="Implement the change",
+        repository_path=tmp_path,
+        model="gemini-3.8-flash",
+    )
+    args = adapter.build_args(req)
+    assert "--dangerously-skip-permissions" in args
+    assert "--sandbox" not in args
+
+
+def test_antigravity_adapter_build_args_resume(tmp_path: Path):
+    """AntigravityAdapter resumes via --conversation, not GeminiAdapter's --resume."""
+    adapter = AntigravityAdapter(command="agy")
+    req = AgentRequest(
+        role=AgentRole.DOCUMENTER,
+        prompt="Update documentation",
+        repository_path=tmp_path,
+        model="gemini-3.8-flash",
+    )
+    args = adapter.build_args(req, session_id="agy-sess-789")
+    assert "--conversation" in args
+    assert args[args.index("--conversation") + 1] == "agy-sess-789"
+    assert "--resume" not in args
+
+
+@pytest.mark.asyncio
+async def test_antigravity_adapter_start_reuses_gemini_parsing(tmp_path: Path, monkeypatch):
+    """AntigravityAdapter reuses GeminiAdapter's schema-agnostic JSON response parsing."""
+    agy_json = (
+        '{"candidates": [{"content": {"parts": [{"text": "LGTM. No issues found."}]}}], '
+        '"session_id": "agy-sess-789"}'
+    )
+
+    async def mock_run(cmd_args, cwd=None, env=None, timeout=None, input_data=None):
+        return ProcessResult(
+            command=[str(a) for a in cmd_args],
+            exit_code=0,
+            stdout=agy_json,
+            stderr="",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            timed_out=False,
+        )
+
+    executor = ProcessExecutor()
+    monkeypatch.setattr(executor, "run", mock_run)
+
+    adapter = AntigravityAdapter(executor=executor)
+    req = AgentRequest(
+        role=AgentRole.DEFAULT_REVIEWER,
+        prompt="Review changes",
+        repository_path=tmp_path,
+        model="gemini-3.8-flash",
+    )
+    result = await adapter.start(req)
+
+    assert result.success is True
+    assert result.provider == Provider.GOOGLE
+    assert result.text == "LGTM. No issues found."
+    assert result.session_id == "agy-sess-789"
+
+
+# ---------------------------------------------------------------------------
 # 6. Adapter Registry Tests
 # ---------------------------------------------------------------------------
 
@@ -552,6 +657,22 @@ def test_create_default_registry():
     gemini = registry.get(Provider.GOOGLE)
     assert isinstance(gemini, GeminiAdapter)
     assert gemini.command == "custom-gemini"
+
+
+def test_create_default_registry_antigravity_dialect():
+    """dialect: antigravity registers an AntigravityAdapter for Provider.GOOGLE, not
+    GeminiAdapter."""
+    cfg = GlobalConfig.model_validate(
+        {
+            "version": 1,
+            "cli": {"gemini": {"command": "agy", "dialect": "antigravity"}},
+        }
+    )
+    registry = create_default_registry(config=cfg)
+
+    google_adapter = registry.get(Provider.GOOGLE)
+    assert isinstance(google_adapter, AntigravityAdapter)
+    assert google_adapter.command == "agy"
 
 
 def test_application_contains_agent_registry():

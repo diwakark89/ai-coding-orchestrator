@@ -16,6 +16,7 @@ def test_default_global_config():
     assert config.cli.claude.command == "claude"
     assert config.cli.codex.command == "codex"
     assert config.cli.gemini.command == "gemini"
+    assert config.cli.gemini.dialect == "gemini"
     assert "agentflow.db" in str(config.storage.database)
     assert "worktrees" in str(config.worktrees.root)
     assert "logs" in str(config.logging.root)
@@ -80,6 +81,26 @@ logging:
     assert config.cli.codex.command == "codex-custom"
     assert config.cli.gemini.command == "gemini-cli"
     assert str(config.storage.database).replace("\\", "/").endswith("/data/agentflow.db")
+
+
+def test_load_global_config_antigravity_dialect(tmp_path: Path):
+    """The Google-provider CLI can be pointed at Antigravity's `agy` via `dialect`."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+version: 1
+
+cli:
+  gemini:
+    command: agy
+    dialect: antigravity
+""",
+        encoding="utf-8",
+    )
+
+    config = load_global_config(config_file)
+    assert config.cli.gemini.command == "agy"
+    assert config.cli.gemini.dialect == "antigravity"
 
 
 def test_load_global_config_invalid_version(tmp_path: Path):

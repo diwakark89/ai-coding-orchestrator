@@ -1,5 +1,6 @@
 """Provider-independent AI agent adapter layer."""
 
+from agentflow.agents.antigravity import AntigravityAdapter
 from agentflow.agents.base import (
     EXCLUDED_MODELS,
     AdapterCapabilities,
@@ -36,6 +37,7 @@ __all__ = [
     "AgentRequest",
     "AgentResult",
     "AgentRole",
+    "AntigravityAdapter",
     "BaseAgentAdapter",
     "ClaudeAdapter",
     "CodexAdapter",

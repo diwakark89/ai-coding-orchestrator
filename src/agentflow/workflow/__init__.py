@@ -4,7 +4,6 @@ from agentflow.workflow.completion import FinalSummary, write_final_summary_arti
 from agentflow.workflow.documentation import DocumentationOutcome, DocumentationWorkflow
 from agentflow.workflow.implementation import ImplementationOutcome, ImplementationWorkflow
 from agentflow.workflow.planning import (
-    ARCHITECTURE_ESCALATION_FLAGS,
     PLAN_REQUIRED_SECTIONS,
     PlannerEscalation,
     PlannerQuestion,
@@ -47,7 +46,6 @@ from agentflow.workflow.verification import (
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
-    "ARCHITECTURE_ESCALATION_FLAGS",
     "MANDATORY_SEVERITIES",
     "PLAN_REQUIRED_SECTIONS",
     "SIMPLE_CATEGORIES",

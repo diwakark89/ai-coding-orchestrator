@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from agentflow.agents.antigravity import AntigravityAdapter
 from agentflow.agents.base import AgentAdapter, Provider
 from agentflow.agents.claude import ClaudeAdapter
 from agentflow.agents.codex import CodexAdapter
@@ -72,6 +73,7 @@ def create_default_registry(
     claude_cmd = config.cli.claude.command if config else "claude"
     codex_cmd = config.cli.codex.command if config else "codex"
     gemini_cmd = config.cli.gemini.command if config else "gemini"
+    gemini_dialect = config.cli.gemini.dialect if config else "gemini"
 
     registry.register(
         Provider.ANTHROPIC,
@@ -81,9 +83,12 @@ def create_default_registry(
         Provider.OPENAI,
         CodexAdapter(command=codex_cmd, executor=proc_executor),
     )
-    registry.register(
-        Provider.GOOGLE,
-        GeminiAdapter(command=gemini_cmd, executor=proc_executor),
+
+    google_adapter: AgentAdapter = (
+        AntigravityAdapter(command=gemini_cmd, executor=proc_executor)
+        if gemini_dialect == "antigravity"
+        else GeminiAdapter(command=gemini_cmd, executor=proc_executor)
     )
+    registry.register(Provider.GOOGLE, google_adapter)
 
     return registry

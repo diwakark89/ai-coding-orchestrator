@@ -47,6 +47,10 @@ def test_application_doctor_run(tmp_path: Path):
     py_check = next(i for i in report.items if i.name == "Python runtime")
     assert py_check.passed is True
 
+    # Google-provider row is labeled for both possible CLIs, not just "Gemini"
+    google_check = next(i for i in report.items if i.name == "Antigravity/Gemini CLI")
+    assert google_check is not None
+
     # Storage check must pass in tmp_path
     storage_check = next(i for i in report.items if i.name == "Global data storage")
     assert storage_check.passed is True

@@ -14,8 +14,9 @@ shells out to the CLI binaries you've separately installed and logged into
 auto-pushes, auto-merges, or auto-deploys. Every run stops for your approval before anything leaves
 the disposable worktree it worked in.
 
-This guide uses a real project as the worked example throughout:
-**`C:\DK_World\IT\MyProjects\Skillify\skillify`** (a Next.js + Spring Boot + FastAPI monorepo).
+This guide uses a real project as the worked example throughout: a Next.js + Spring Boot +
+FastAPI monorepo, referred to below by the relative path `..\skillify` — a sibling directory next
+to `ai-coding-orchestrator` (adjust the relative path if your own project lives elsewhere).
 
 > **Heads up:** this is a young tool. A few things below still work more narrowly than their name
 > suggests — read [§9 Known Limitations](#9-known-limitations) before you rely on them in anger.
@@ -31,30 +32,81 @@ You need, on the machine running AgentFlow:
 - At least one coding-agent CLI, installed **and separately authenticated by you**:
   - [`claude`](https://docs.claude.com/en/docs/claude-code) (Anthropic)
   - `codex` (OpenAI)
-  - `gemini` (Google)
+  - `gemini` (Google) — or Google's newer [`agy`](https://antigravity.google/docs/cli/) CLI
+    (Antigravity); see the `dialect` note in §2, since `agy`'s flag syntax is genuinely different
+    from `gemini`'s and needs a config setting, not just a renamed command.
 
   AgentFlow doesn't do auth for you — if a CLI needs `claude login` / `codex login` / `gemini
-  auth`, run that yourself first.
+  auth`/`agy auth`, run that yourself first.
 
 ### Install AgentFlow
 
-From the `ai-coding-orchestrator` repo:
+There are two ways to install it. **If you just want to run AgentFlow against your own
+projects** (the normal case, and what every other example in this guide assumes), use Option A.
+Use Option B only if you're changing AgentFlow's own source code.
+
+#### Option A: install as a global command (recommended)
+
+Run this **once**, from *inside* the `ai-coding-orchestrator` repo you cloned/downloaded — `.`
+below means "this directory":
 
 ```bash
-# Local editable dev environment
+cd ai-coding-orchestrator
+uv tool install --editable .
+```
+
+`--editable` links the global command back to this repo's source, so a later `git pull` here
+takes effect immediately, with no reinstall needed.
+
+That's it — `agentflow` is now a command on your PATH, usable from **any directory, against any
+project**. You do **not** need to `cd` back into `ai-coding-orchestrator` to use it. For example,
+from inside your own project:
+
+```bash
+cd ..\skillify
+agentflow --version
+agentflow doctor
+```
+
+This is why every other `agentflow ...` example in this guide (including the ones using
+`-C "..\skillify"` from elsewhere) never shows a `cd` into `ai-coding-orchestrator` first — they
+all assume you installed it this way.
+
+**If `agentflow: command not found` after installing:** `uv tool install` puts the command in
+`~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows), which isn't always on PATH yet. Run `uv
+tool update-shell` and open a **new** terminal window, then try again.
+
+#### Option B: local dev environment (only if you're modifying AgentFlow itself)
+
+Run every command below from *inside* the `ai-coding-orchestrator` repo — this does **not**
+create a global `agentflow` command, so every future invocation needs both `uv run` and this
+directory as your working directory:
+
+```bash
+cd ai-coding-orchestrator
 uv venv
 uv pip install -e ".[dev]"
 uv run agentflow --version
-
-# OR: install `agentflow` as a global command on your PATH
-uv tool install --editable .
-agentflow --version
 ```
+
+This also installs the test/lint tooling (`pytest`, `ruff`, `mypy`) that Option A skips. To point
+this dev copy at another project without leaving `ai-coding-orchestrator`, use `-C`:
+
+```bash
+uv run agentflow -C "..\skillify" doctor
+```
+
+> **A note on the paths in the rest of this guide:** every example below uses
+> `-C "..\skillify"`, which assumes you're sitting in `ai-coding-orchestrator` (or another sibling
+> directory) when you run it. If you're already `cd`'d into your own project instead — e.g. right
+> after Option A's last step above — just drop the `-C "..\skillify"` argument entirely;
+> `agentflow` auto-discovers the project from your current directory, so plain `agentflow doctor`
+> (no flag) does the same thing.
 
 ### Check your environment: `agentflow doctor`
 
 ```bash
-agentflow doctor -C "C:\DK_World\IT\MyProjects\Skillify\skillify"
+agentflow doctor -C "..\skillify"
 ```
 
 `doctor` checks, live, every time you run it:
@@ -83,7 +135,7 @@ you happen to run `doctor`.
 ### Quick way: `agentflow init`
 
 ```bash
-agentflow init -C "C:\DK_World\IT\MyProjects\Skillify\skillify"
+agentflow init -C "..\skillify"
 ```
 
 This walks the project (up to 3 directories deep, skipping `node_modules`/`.venv`/`dist`/`build`/
@@ -119,10 +171,10 @@ the two FastAPI services):
 
 1. In your target project's repo root, create the folder and file:
    ```bash
-   mkdir "C:\DK_World\IT\MyProjects\Skillify\skillify\.ai-orchestrator"
+   mkdir "..\skillify\.ai-orchestrator"
    ```
 2. Save the following as
-   `C:\DK_World\IT\MyProjects\Skillify\skillify\.ai-orchestrator\routing.yaml`:
+   `..\skillify\.ai-orchestrator\routing.yaml`:
 
    ```yaml
    version: 1
@@ -283,7 +335,7 @@ the two FastAPI services):
        - README.md
        - PROJECT.md
    ```
-3. Validate it loaded: `agentflow doctor -C "...\skillify"` — the "Project" check parses this file
+3. Validate it loaded: `agentflow doctor -C "..\skillify"` — the "Project" check parses this file
    and reports whether it's valid.
 
 ### What each section means
@@ -303,6 +355,24 @@ names (`cli.claude.command`, etc. — override if your binary isn't literally na
 for you — if it's absent, it just uses built-in defaults in memory; create it by hand only if you
 need to override something (e.g. `$env:AGENTFLOW_CONFIG_PATH` also lets you point at a different
 path).
+
+**Using Google's Antigravity CLI (`agy`) instead of `gemini`:** don't just set
+`cli.gemini.command: agy` — `agy`'s non-interactive flag syntax is genuinely different from
+`gemini`'s (prompt via `-p`, resume via `--continue`/`--conversation`, no `--read-only`
+equivalent), so it also needs `dialect: antigravity` to route through the matching adapter:
+```yaml
+# ~/.agentflow/config.yaml
+version: 1
+cli:
+  gemini:
+    command: agy
+    dialect: antigravity
+```
+Once set, `doctor`'s Google-provider row is labeled `"Antigravity/Gemini CLI"` and checks for
+`agy` instead of `gemini`. If `agy` isn't on PATH even though it's installed, check where its
+installer actually put it (on Windows this may be `%LOCALAPPDATA%\antigravity\bin`, which the
+installer doesn't always add to PATH) rather than assuming AgentFlow can't find a correctly-PATH'd
+binary.
 
 ---
 
@@ -333,7 +403,7 @@ route). `-C/--project` can go before or after the subcommand.
 ## 4. Plan a feature — sample prompt
 
 ```bash
-agentflow -C "C:\DK_World\IT\MyProjects\Skillify\skillify" complete "Add a GET /api/v1/health endpoint to web-service that reports database connectivity status"
+agentflow -C "..\skillify" complete "Add a GET /api/v1/health endpoint to web-service that reports database connectivity status"
 ```
 
 What happens:
@@ -358,10 +428,10 @@ Try smaller, cheaper commands first while learning the tool:
 
 ```bash
 # See the routing decision only — no code, no CLI cost
-agentflow -C "...\skillify" route "Add ownership validation to the exam endpoint"
+agentflow -C "..\skillify" route "Add ownership validation to the exam endpoint"
 
 # Plan interactively without implementing yet
-agentflow -C "...\skillify" run "Add a GET /api/v1/health endpoint to web-service"
+agentflow -C "..\skillify" run "Add a GET /api/v1/health endpoint to web-service"
 ```
 
 ---
@@ -372,9 +442,9 @@ There's no `agentflow logs`/`show` command. Two ways to inspect a run:
 
 **Quick summaries:**
 ```bash
-agentflow -C "...\skillify" status          # active runs for this project
-agentflow -C "...\skillify" runs --limit 20 # recent runs, any status
-agentflow -C "...\skillify" stats           # routing/verification metrics
+agentflow -C "..\skillify" status          # active runs for this project
+agentflow -C "..\skillify" runs --limit 20 # recent runs, any status
+agentflow -C "..\skillify" stats           # routing/verification metrics
 ```
 
 **Full detail — read the artifact files directly**, under
@@ -434,7 +504,7 @@ It still **refuses**:
   happened) — nothing to retry, start a new run instead.
 
 ```bash
-agentflow -C "...\skillify" runs   # find the RUN-ID, its Stage, and the blocker_reason
+agentflow -C "..\skillify" runs   # find the RUN-ID, its Stage, and the blocker_reason
 agentflow resume RUN-AB12CD34      # retries from that stage
 ```
 
@@ -457,7 +527,7 @@ Continuing the §6 scenario — Claude's usage limit got hit mid-implementation,
 — resume it straight onto a fallback provider for that stage:
 
 ```bash
-agentflow -C "C:\DK_World\IT\MyProjects\Skillify\skillify" resume RUN-AB12CD34 --override-provider openai --override-model "GPT-5.6 Terra" --override-stage implementation
+agentflow -C "..\skillify" resume RUN-AB12CD34 --override-provider openai --override-model "GPT-5.6 Terra" --override-stage implementation
 ```
 
 If the limit was hit during review instead (e.g. a security-flagged change escalated review to
@@ -482,7 +552,7 @@ flags are a manual switch, not a safety net that fires itself.
 ## 8. Cleaning up
 
 ```bash
-agentflow -C "...\skillify" cleanup
+agentflow -C "..\skillify" cleanup
 ```
 
 Removes worktrees/logs for runs that ended `COMPLETED`/`BLOCKED`/`CANCELLED`/`FAILED`, and clears

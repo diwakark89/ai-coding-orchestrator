@@ -10,6 +10,7 @@ from agentflow.application import (
     Application,
     CleanupReport,
     ImplementationRunOutcome,
+    InitResult,
     PipelineOutcome,
     RoutingOutcome,
 )
@@ -122,6 +123,52 @@ def test_cli_doctor_nonexistent_project_fails(tmp_path: Path):
     result = runner.invoke(app, ["-C", str(missing), "doctor"])
     assert result.exit_code == 1
     assert "Critical environment requirements are missing" in result.output
+
+
+def test_cli_init_reports_success(monkeypatch, tmp_path: Path):
+    """agentflow init prints the providers used and the written path, and exits 0."""
+
+    def fake_run_init(self, project_path=None, force=False, providers=None):
+        return InitResult(
+            path=tmp_path / ".ai-orchestrator" / "routing.yaml",
+            detected_groups=["python"],
+            overwritten=False,
+            providers=["anthropic"],
+        )
+
+    monkeypatch.setattr(Application, "run_init", fake_run_init)
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert "Providers: anthropic" in result.output
+    assert "routing.yaml" in result.output
+
+
+def test_cli_init_passes_parsed_providers_flag(monkeypatch, tmp_path: Path):
+    """--providers is parsed into Provider values and forwarded to Application.run_init."""
+    observed: dict[str, object] = {}
+
+    def fake_run_init(self, project_path=None, force=False, providers=None):
+        observed["providers"] = providers
+        return InitResult(
+            path=tmp_path / ".ai-orchestrator" / "routing.yaml",
+            providers=sorted(p.value for p in (providers or [])),
+        )
+
+    monkeypatch.setattr(Application, "run_init", fake_run_init)
+    # "claude" and "agy" are friendly aliases for anthropic and google respectively.
+    result = runner.invoke(app, ["init", "--providers", "claude,agy"])
+
+    assert result.exit_code == 0
+    assert observed["providers"] == {Provider.ANTHROPIC, Provider.GOOGLE}
+
+
+def test_cli_init_invalid_provider_exits_nonzero():
+    """An unrecognized --providers entry fails fast with a clear error, not a stack trace."""
+    result = runner.invoke(app, ["init", "--providers", "not-a-real-provider"])
+
+    assert result.exit_code == 1
+    assert "Invalid --providers entry" in result.output
 
 
 def test_cli_run_reports_task_classified(monkeypatch):

@@ -8,6 +8,7 @@ import typer
 from pydantic import ValidationError
 
 from agentflow import __version__
+from agentflow.agents.base import Provider
 from agentflow.application import Application
 from agentflow.errors import AgentFlowError, ProjectNotFoundError
 from agentflow.routing.rules import ModelRef, RoleOverride
@@ -35,6 +36,43 @@ _OVERRIDE_STAGE_CHOICES: dict[str, Stage] = {
     "review": Stage.REVIEW,
     "documentation": Stage.DOCUMENTATION,
 }
+
+# Friendly CLI names -> provider, for --providers. agy/antigravity are Google's Antigravity CLI
+# (a distinct binary/dialect from `gemini`, but the same routing provider -- see `dialect:` in
+# .ai-orchestrator/routing.yaml for which one actually gets invoked).
+_PROVIDER_ALIASES: dict[str, Provider] = {
+    "claude": Provider.ANTHROPIC,
+    "anthropic": Provider.ANTHROPIC,
+    "codex": Provider.OPENAI,
+    "openai": Provider.OPENAI,
+    "gemini": Provider.GOOGLE,
+    "agy": Provider.GOOGLE,
+    "antigravity": Provider.GOOGLE,
+    "google": Provider.GOOGLE,
+}
+
+
+def _parse_providers_flag(app_instance: Application, raw: str | None) -> set[Provider] | None:
+    """Parse --providers into a set of Provider, or None to trigger auto-detection."""
+    if raw is None:
+        return None
+    providers: set[Provider] = set()
+    for name in raw.split(","):
+        key = name.strip().lower()
+        if not key:
+            continue
+        provider = _PROVIDER_ALIASES.get(key)
+        if provider is None:
+            app_instance.ui.print_error(
+                f"Invalid --providers entry '{name}'. Expected one of: "
+                f"{', '.join(sorted(_PROVIDER_ALIASES))}."
+            )
+            raise typer.Exit(code=1)
+        providers.add(provider)
+    if not providers:
+        app_instance.ui.print_error("--providers was given but named no valid provider.")
+        raise typer.Exit(code=1)
+    return providers
 
 
 def _build_role_override(
@@ -135,21 +173,37 @@ def init_cmd(
         bool,
         typer.Option("--force", help="Overwrite an existing .ai-orchestrator/routing.yaml."),
     ] = False,
+    providers: Annotated[
+        str | None,
+        typer.Option(
+            "--providers",
+            help=(
+                "Comma-separated coding-agent CLIs to generate the profile for "
+                "(claude/codex/gemini, or agy/antigravity, or anthropic/openai/google). "
+                "Default: auto-detect whichever are actually on PATH."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Generate a starter .ai-orchestrator/routing.yaml, seeded from detected project structure.
 
     Detection is a heuristic starting point only -- always review the generated file before
-    running real tasks against it.
+    running real tasks against it. Without --providers, only CLIs actually found on PATH are
+    used, so the profile is runnable even if you don't have all of claude/codex/gemini installed.
     """
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
+    resolved_providers = _parse_providers_flag(app_instance, providers)
     try:
-        result = app_instance.run_init(project_path=target_project, force=force)
+        result = app_instance.run_init(
+            project_path=target_project, force=force, providers=resolved_providers
+        )
     except AgentFlowError as e:
         app_instance.ui.print_error(str(e))
         raise typer.Exit(code=1) from e
 
+    app_instance.ui.print_info(f"Providers: {', '.join(result.providers)}")
     if result.detected_groups:
         groups_text = ", ".join(result.detected_groups)
         app_instance.ui.print_info(f"Detected verification groups: {groups_text}")

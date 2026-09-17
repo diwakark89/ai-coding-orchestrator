@@ -1,9 +1,10 @@
-"""Interactive Claude-based planning workflow.
+"""Interactive planning workflow.
 
-Drives a multi-turn conversation with the Claude planner (Sonnet by default, escalating to
-Opus for architecture-sensitive work), persists every question/answer and state transition,
-and produces the two planner output artifacts: a human-readable `approved-plan.md` and a
-machine-readable `task-profile.json` (validated against `TaskProfile`).
+Drives a multi-turn conversation with the configured planner CLI (Claude by default, but any
+provider `routing.yaml`'s `models.planner.*` resolves to -- see `PlanningWorkflow`), escalating
+to a stronger model for architecture-sensitive work, persists every question/answer and state
+transition, and produces the two planner output artifacts: a human-readable `approved-plan.md`
+and a machine-readable `task-profile.json` (validated against `TaskProfile`).
 """
 
 import json
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentflow.agents.base import AgentAdapter, AgentRequest, AgentResult, AgentRole, Provider
+from agentflow.agents.base import AgentAdapter, AgentRequest, AgentResult, AgentRole
 from agentflow.agents.parser import parse_model_into_schema
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.errors import PlanningBlockedError, StructuredParsingError
@@ -23,26 +24,12 @@ from agentflow.observability.events import record_agent_completed, record_agent_
 from agentflow.persistence.database import DatabaseManager
 from agentflow.persistence.models import DecisionRecord, RunStatus
 from agentflow.project.context import ProjectContext
+from agentflow.routing.rules import ModelRef, ModelsConfig, RoutingRulesConfig
 from agentflow.task.profile import TaskProfile
 from agentflow.ui.approval import ApprovalDecision, ask_plan_approval, ask_plan_feedback
 from agentflow.ui.console import ConsoleUI
 from agentflow.ui.questions import ask_question
 from agentflow.workflow.states import WorkflowState, validate_transition
-
-SONNET_MODEL = "Claude Sonnet 5"
-OPUS_MODEL = "Claude Opus 5"
-
-# TDD §13.2 / phased-implementation-plan.md Phase 3 Step 5.
-ARCHITECTURE_ESCALATION_FLAGS: frozenset[str] = frozenset(
-    {
-        "architecture_change",
-        "new_service",
-        "new_datastore",
-        "security_boundary_change",
-        "payment",
-        "cross_service_ownership_change",
-    }
-)
 
 # TDD §14.1 / phased-implementation-plan.md Phase 3 Step 6.
 PLAN_REQUIRED_SECTIONS: tuple[str, ...] = (
@@ -117,11 +104,13 @@ class PlanningOutcome:
     blocker_reason: str | None = None
 
 
-def _build_initial_prompt(task_description: str, project_context: ProjectContext) -> str:
+def _build_initial_prompt(
+    task_description: str, project_context: ProjectContext, architecture_flags: list[str]
+) -> str:
     """Build the first-turn prompt instructing the planner on its role and output contract."""
     schema_json = json.dumps(TaskProfile.model_json_schema())
     sections = ", ".join(PLAN_REQUIRED_SECTIONS)
-    escalation_flags = ", ".join(sorted(ARCHITECTURE_ESCALATION_FLAGS))
+    escalation_flags = ", ".join(sorted(architecture_flags))
     return (
         "You are AgentFlow's planning agent. Operate strictly read-only: do not edit any files.\n\n"
         f"Repository root: {project_context.root_path}\n"
@@ -208,13 +197,17 @@ def _build_retry_prompt(error: str) -> str:
 
 
 class PlanningWorkflow:
-    """Coordinates interactive Claude planning: question loop, Opus escalation, plan approval,
-    and TaskProfile generation."""
+    """Coordinates interactive planning: question loop, architecture escalation, plan approval,
+    and TaskProfile generation. The planner's provider/model come from `models_config`/
+    `routing_rules` (routing.yaml's `models.planner.*`/`routing.planning.*`), not a hardcoded
+    provider."""
 
     def __init__(
         self,
         db_manager: DatabaseManager,
         agent_registry: AgentAdapterRegistry,
+        models_config: ModelsConfig,
+        routing_rules: RoutingRulesConfig,
         console_ui: ConsoleUI | None = None,
         question_prompt: Callable[[PlannerQuestion], str] | None = None,
         approval_prompt: Callable[[], ApprovalDecision] | None = None,
@@ -224,6 +217,8 @@ class PlanningWorkflow:
     ) -> None:
         self.db_manager = db_manager
         self.agent_registry = agent_registry
+        self.models_config = models_config
+        self.routing_rules = routing_rules
         self.ui = console_ui or ConsoleUI()
         self.question_prompt: Callable[[PlannerQuestion], str] = (
             question_prompt or self._default_question_prompt
@@ -234,6 +229,16 @@ class PlanningWorkflow:
         self.feedback_prompt: Callable[[], str] = feedback_prompt or self._default_feedback_prompt
         self.max_malformed_retries = max_malformed_retries
         self.max_turns = max_turns
+
+    @property
+    def _default_model_ref(self) -> ModelRef:
+        """The configured planner model/provider for a fresh (non-escalated) turn."""
+        return self.models_config.resolve(self.routing_rules.planning.default)
+
+    @property
+    def _architecture_model_ref(self) -> ModelRef:
+        """The configured planner model/provider to escalate to for architecture-sensitive work."""
+        return self.models_config.resolve(self.routing_rules.planning.architecture)
 
     def _default_question_prompt(self, question: PlannerQuestion) -> str:
         """Default terminal prompt for a planner question."""
@@ -285,7 +290,7 @@ class PlanningWorkflow:
         project_context: ProjectContext,
         current_state: WorkflowState,
     ) -> PlanningOutcome:
-        """Resume an interrupted planning run from its persisted Claude session when possible.
+        """Resume an interrupted planning run from its persisted planner session when possible.
 
         If the prior CLI session is unavailable, reconstruct the conversation from the task and
         persisted user decisions, then start a fresh planner session and record that recovery.
@@ -304,7 +309,6 @@ class PlanningWorkflow:
         if current_state != WorkflowState.PLANNING:
             self._transition(run_id, WorkflowState.PLANNING, "Resuming interrupted planning")
 
-        adapter = self.agent_registry.get(Provider.ANTHROPIC)
         prior_sessions = self.db_manager.list_agent_sessions(run_id)
         prior_planner_sessions = [
             session
@@ -312,13 +316,22 @@ class PlanningWorkflow:
             if session.stage == WorkflowState.PLANNING.value and session.cli_session_id
         ]
         prior_session = prior_planner_sessions[-1] if prior_planner_sessions else None
+        initial_ref = (
+            ModelRef(provider=prior_session.provider, model=prior_session.model)
+            if prior_session is not None
+            else self._default_model_ref
+        )
+        adapter = self.agent_registry.get(initial_ref.provider_enum)
         session_id = (
             prior_session.cli_session_id
             if prior_session is not None and adapter.capabilities.supports_resume
             else None
         )
-        model = prior_session.model if prior_session is not None else SONNET_MODEL
-        role = AgentRole.ARCHITECTURE_PLANNER if model == OPUS_MODEL else AgentRole.DEFAULT_PLANNER
+        role = (
+            AgentRole.ARCHITECTURE_PLANNER
+            if initial_ref == self._architecture_model_ref
+            else AgentRole.DEFAULT_PLANNER
+        )
         decisions = self.db_manager.list_decisions(run_id)
         prompt = _build_recovery_prompt(task_description, decisions, session_id is not None)
         recovery_kind = (
@@ -335,7 +348,7 @@ class PlanningWorkflow:
                 project_context,
                 initial_prompt=prompt,
                 initial_session_id=session_id,
-                initial_model=model,
+                initial_ref=initial_ref,
                 initial_role=role,
             )
         except PlanningBlockedError as error:
@@ -375,34 +388,39 @@ class PlanningWorkflow:
         project_context: ProjectContext,
         initial_prompt: str | None = None,
         initial_session_id: str | None = None,
-        initial_model: str = SONNET_MODEL,
+        initial_ref: ModelRef | None = None,
         initial_role: AgentRole = AgentRole.DEFAULT_PLANNER,
     ) -> PlanningOutcome:
-        adapter = self.agent_registry.get(Provider.ANTHROPIC)
-        model = initial_model
+        current_ref = initial_ref or self._default_model_ref
         role = initial_role
         session_id = initial_session_id
-        escalated = model == OPUS_MODEL
-        prompt = initial_prompt or _build_initial_prompt(task_description, project_context)
+        escalated = current_ref == self._architecture_model_ref
+        architecture_flags = self.routing_rules.planning.architecture_if_any
+        prompt = initial_prompt or _build_initial_prompt(
+            task_description, project_context, architecture_flags
+        )
 
         for _turn in range(self.max_turns):
+            adapter = self.agent_registry.get(current_ref.provider_enum)
             result = await self._invoke_planner(
-                run_id, adapter, model, role, project_context, prompt, session_id
+                run_id, adapter, current_ref.model, role, project_context, prompt, session_id
             )
             session_id = result.session_id or session_id
 
             planner_turn, result = await self._parse_turn_with_retry(
-                run_id, adapter, model, role, project_context, result, session_id
+                run_id, adapter, current_ref.model, role, project_context, result, session_id
             )
             session_id = result.session_id or session_id
 
             if planner_turn.escalation and not escalated:
-                flags = [
-                    f for f in planner_turn.escalation.flags if f in ARCHITECTURE_ESCALATION_FLAGS
-                ]
+                flags = [f for f in planner_turn.escalation.flags if f in architecture_flags]
                 if flags:
                     escalated = True
-                    model = OPUS_MODEL
+                    new_ref = self._architecture_model_ref
+                    if new_ref.provider_enum != current_ref.provider_enum:
+                        # A CLI session ID from the old provider means nothing to the new one.
+                        session_id = None
+                    current_ref = new_ref
                     role = AgentRole.ARCHITECTURE_PLANNER
                     reason = planner_turn.escalation.reason or ", ".join(flags)
                     self.db_manager.record_decision(
@@ -412,7 +430,7 @@ class PlanningWorkflow:
                         f"flags={flags}; reason={reason}",
                     )
                     self.ui.print_info(
-                        f"Escalating to Claude Opus 5 ({', '.join(flags)}): {reason}"
+                        f"Escalating planning to {current_ref.model} ({', '.join(flags)}): {reason}"
                     )
 
             if planner_turn.status == PlannerStatus.BLOCKED:
