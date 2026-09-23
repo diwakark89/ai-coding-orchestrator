@@ -21,6 +21,11 @@ app = typer.Typer(
     help="AgentFlow — Reusable Local Multi-Agent Coding Orchestrator",
     no_args_is_help=True,
     add_completion=False,
+    epilog="""Examples:
+  agentflow init
+  agentflow complete "Add a health check endpoint"
+
+Run 'agentflow COMMAND --help' for that command's options and examples.""",
 )
 
 
@@ -75,6 +80,35 @@ def _parse_providers_flag(app_instance: Application, raw: str | None) -> set[Pro
     return providers
 
 
+def _resolve_task_description(
+    app_instance: Application, task: str | None, file: Path | None
+) -> str:
+    """Resolve the task description from the TASK argument or --file/-f, not both.
+
+    --file is the escape hatch for a task description that's long, multi-paragraph, or
+    otherwise awkward to type as a single shell argument -- point it at a plain-text or
+    Markdown file and its full contents become the task description.
+    """
+    if task is not None and file is not None:
+        app_instance.ui.print_error("Provide the task as an argument or via --file, not both.")
+        raise typer.Exit(code=1)
+    if file is not None:
+        try:
+            text = file.read_text(encoding="utf-8")
+        except OSError as e:
+            app_instance.ui.print_error(f"Could not read --file '{file}': {e}")
+            raise typer.Exit(code=1) from e
+        text = text.strip()
+        if not text:
+            app_instance.ui.print_error(f"--file '{file}' is empty.")
+            raise typer.Exit(code=1)
+        return text
+    if task is None or not task.strip():
+        app_instance.ui.print_error("Provide a task description, or use --file/-f.")
+        raise typer.Exit(code=1)
+    return task
+
+
 def _build_role_override(
     app_instance: Application,
     override_provider: str | None,
@@ -127,7 +161,7 @@ def main(
         typer.Option(
             "--project",
             "-C",
-            help="Target project repository path (overrides auto-discovery).",
+            help="Target project directory path (overrides auto-discovery).",
         ),
     ] = None,
 ) -> None:
@@ -136,7 +170,12 @@ def main(
     ctx.obj["project"] = project
 
 
-@app.command(name="doctor")
+@app.command(
+    name="doctor",
+    epilog="""Examples:
+  agentflow doctor
+  agentflow doctor --project ../other-repo""",
+)
 def doctor_cmd(
     ctx: typer.Context,
     project: Annotated[
@@ -158,7 +197,12 @@ def doctor_cmd(
         raise typer.Exit(code=1)
 
 
-@app.command(name="init")
+@app.command(
+    name="init",
+    epilog="""Examples:
+  agentflow init
+  agentflow init --providers claude,codex --force""",
+)
 def init_cmd(
     ctx: typer.Context,
     project: Annotated[
@@ -219,7 +263,12 @@ def init_cmd(
     )
 
 
-@app.command(name="status")
+@app.command(
+    name="status",
+    epilog="""Examples:
+  agentflow status
+  agentflow status --project ../other-repo""",
+)
 def status_cmd(
     ctx: typer.Context,
     project: Annotated[
@@ -243,13 +292,27 @@ def status_cmd(
         raise typer.Exit(code=1)
 
 
-@app.command(name="run")
-def run_cmd(
+@app.command(
+    name="plan",
+    epilog="""Examples:
+  agentflow plan "Add a health check endpoint"
+  agentflow plan "Add rate limiting to the login route" --project ../other-repo
+  agentflow plan --file task.md""",
+)
+def plan_cmd(
     ctx: typer.Context,
     task: Annotated[
-        str,
+        str | None,
         typer.Argument(help="Natural-language description of the requested change."),
-    ],
+    ] = None,
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Read the task description from this file instead of the TASK argument.",
+        ),
+    ] = None,
     project: Annotated[
         Path | None,
         typer.Option(
@@ -263,10 +326,13 @@ def run_cmd(
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
+    task_description = _resolve_task_description(app_instance, task, file)
 
     try:
         outcome = asyncio.run(
-            app_instance.run_planning(task_description=task, project_path=target_project)
+            app_instance.run_planning(
+                task_description=task_description, project_path=target_project
+            )
         )
     except AgentFlowError as e:
         app_instance.ui.print_error(str(e))
@@ -277,6 +343,13 @@ def run_cmd(
             f"Run {outcome.run_id} reached TASK_CLASSIFIED.\n"
             f"  Plan:        {outcome.plan_path}\n"
             f"  TaskProfile: {outcome.task_profile_path}"
+        )
+        app_instance.ui.print_info(
+            "Next step -- continue this run through implementation, verification, review, "
+            "documentation, and a final approval prompt:\n"
+            f"    agentflow resume {outcome.run_id}\n"
+            "Or run the full pipeline end-to-end from scratch in one command next time:\n"
+            f'    agentflow complete "{task_description}"'
         )
         return
 
@@ -291,13 +364,27 @@ def run_cmd(
     raise typer.Exit(code=1)
 
 
-@app.command(name="route")
+@app.command(
+    name="route",
+    epilog="""Examples:
+  agentflow route "Add a health check endpoint"
+  agentflow route "Fix flaky test" --override-provider openai --override-model 'GPT-6 Sol'
+  agentflow route --file task.md""",
+)
 def route_cmd(
     ctx: typer.Context,
     task: Annotated[
-        str,
+        str | None,
         typer.Argument(help="Natural-language description of the requested change."),
-    ],
+    ] = None,
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Read the task description from this file instead of the TASK argument.",
+        ),
+    ] = None,
     project: Annotated[
         Path | None,
         typer.Option(
@@ -335,6 +422,7 @@ def route_cmd(
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
+    task_description = _resolve_task_description(app_instance, task, file)
     role_override = _build_role_override(
         app_instance, override_provider, override_model, override_stage
     )
@@ -342,7 +430,9 @@ def route_cmd(
     try:
         outcome = asyncio.run(
             app_instance.run_routing(
-                task_description=task, project_path=target_project, role_override=role_override
+                task_description=task_description,
+                project_path=target_project,
+                role_override=role_override,
             )
         )
     except AgentFlowError as e:
@@ -361,13 +451,27 @@ def route_cmd(
     app_instance.ui.print_success(f"Routing decision persisted to {outcome.decision_path}")
 
 
-@app.command(name="implement")
+@app.command(
+    name="implement",
+    epilog="""Examples:
+  agentflow implement "Add a health check endpoint"
+  agentflow implement "Fix flaky test" --override-provider openai --override-model 'GPT-6 Sol'
+  agentflow implement --file task.md""",
+)
 def implement_cmd(
     ctx: typer.Context,
     task: Annotated[
-        str,
+        str | None,
         typer.Argument(help="Natural-language description of the requested change."),
-    ],
+    ] = None,
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Read the task description from this file instead of the TASK argument.",
+        ),
+    ] = None,
     project: Annotated[
         Path | None,
         typer.Option(
@@ -409,6 +513,7 @@ def implement_cmd(
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
+    task_description = _resolve_task_description(app_instance, task, file)
     role_override = _build_role_override(
         app_instance, override_provider, override_model, override_stage
     )
@@ -416,7 +521,9 @@ def implement_cmd(
     try:
         outcome = asyncio.run(
             app_instance.run_implementation(
-                task_description=task, project_path=target_project, role_override=role_override
+                task_description=task_description,
+                project_path=target_project,
+                role_override=role_override,
             )
         )
     except AgentFlowError as e:
@@ -447,13 +554,27 @@ def implement_cmd(
     raise typer.Exit(code=1)
 
 
-@app.command(name="complete")
+@app.command(
+    name="complete",
+    epilog="""Examples:
+  agentflow complete "Add a health check endpoint"
+  agentflow complete "Fix flaky test" --override-provider openai --override-model 'GPT-6 Sol'
+  agentflow complete --file task.md""",
+)
 def complete_cmd(
     ctx: typer.Context,
     task: Annotated[
-        str,
+        str | None,
         typer.Argument(help="Natural-language description of the requested change."),
-    ],
+    ] = None,
+    file: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Read the task description from this file instead of the TASK argument.",
+        ),
+    ] = None,
     project: Annotated[
         Path | None,
         typer.Option(
@@ -494,6 +615,7 @@ def complete_cmd(
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
     app_instance = Application()
+    task_description = _resolve_task_description(app_instance, task, file)
     role_override = _build_role_override(
         app_instance, override_provider, override_model, override_stage
     )
@@ -501,7 +623,9 @@ def complete_cmd(
     try:
         outcome = asyncio.run(
             app_instance.run_pipeline(
-                task_description=task, project_path=target_project, role_override=role_override
+                task_description=task_description,
+                project_path=target_project,
+                role_override=role_override,
             )
         )
     except AgentFlowError as e:
@@ -525,7 +649,12 @@ def complete_cmd(
     raise typer.Exit(code=1)
 
 
-@app.command(name="resume")
+@app.command(
+    name="resume",
+    epilog="""Examples:
+  agentflow resume RUN-AB12CD34
+  agentflow resume RUN-AB12CD34 --override-provider openai --override-model 'GPT-6 Sol'""",
+)
 def resume_cmd(
     ctx: typer.Context,
     run_id: Annotated[
@@ -606,7 +735,12 @@ def resume_cmd(
     raise typer.Exit(code=1)
 
 
-@app.command(name="runs")
+@app.command(
+    name="runs",
+    epilog="""Examples:
+  agentflow runs
+  agentflow runs --all --limit 50""",
+)
 def runs_cmd(
     ctx: typer.Context,
     project: Annotated[
@@ -638,7 +772,12 @@ def runs_cmd(
         raise typer.Exit(code=1)
 
 
-@app.command(name="cleanup")
+@app.command(
+    name="cleanup",
+    epilog="""Examples:
+  agentflow cleanup
+  agentflow cleanup --project ../other-repo""",
+)
 def cleanup_cmd(
     ctx: typer.Context,
     project: Annotated[
@@ -665,7 +804,12 @@ def cleanup_cmd(
     app_instance.render_cleanup_report(report)
 
 
-@app.command(name="stats")
+@app.command(
+    name="stats",
+    epilog="""Examples:
+  agentflow stats
+  agentflow stats --all""",
+)
 def stats_cmd(
     ctx: typer.Context,
     project: Annotated[
@@ -693,7 +837,12 @@ def stats_cmd(
     app_instance.render_statistics(report)
 
 
-@app.command(name="retire")
+@app.command(
+    name="retire",
+    epilog="""Examples:
+  agentflow retire "GPT-5.6 Terra" "GPT-6 Sol"
+  agentflow retire --list""",
+)
 def retire_cmd(
     old_model: Annotated[
         str | None,

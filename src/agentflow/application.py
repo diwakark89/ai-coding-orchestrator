@@ -846,7 +846,9 @@ class Application:
         to exist.
         """
         cfg = routing_config
-        verification_runner = VerificationRunner(self.db_manager, executor=self.executor)
+        verification_runner = VerificationRunner(
+            self.db_manager, executor=self.executor, console_ui=self.ui
+        )
         verification_config = cfg.verification if cfg else None
         log_dir = ctx.root_path / ".ai-orchestrator" / "runs" / run_id / "verification"
         verification = await verification_runner.run(
@@ -1005,7 +1007,9 @@ class Application:
         ) or DEFAULT_ROUTING_RULES
         limits = routing_config.limits if routing_config else None
 
-        verification_runner = VerificationRunner(self.db_manager, executor=self.executor)
+        verification_runner = VerificationRunner(
+            self.db_manager, executor=self.executor, console_ui=self.ui
+        )
         worktree_manager = WorktreeManager(self.config.worktrees.root, executor=self.executor)
 
         transition_run_state(
@@ -1164,13 +1168,16 @@ class Application:
             return None
         return path.read_text(encoding="utf-8")
 
-    def _read_task_artifact(self, run_dir: Path) -> str:
-        """Recover the original task description from the persisted task.md artifact."""
+    def _read_task_artifact(self, run_dir: Path, fallback: str) -> str:
+        """Recover the original task description, preferring the on-disk task.md artifact.
+
+        Falls back to `fallback` (the durable `runs.task` DB column) if the artifact is
+        missing -- task.md is a human-readable export, not the source of truth, so its
+        absence must never block a resume when the database still has the description.
+        """
         text = self._read_artifact_text(run_dir / "task.md")
         if text is None:
-            raise ResumeError(
-                f"Run artifact directory {run_dir} is missing task.md; cannot resume."
-            )
+            return fallback
         # Undo the "# Task\n\n<description>\n" wrapper written by PlanningWorkflow._write_artifact.
         return text.removeprefix("# Task\n\n").rstrip("\n")
 
@@ -1386,7 +1393,7 @@ class Application:
                 )
             current_state = WorkflowState.TASK_CLASSIFIED
 
-        task_description = self._read_task_artifact(run_dir)
+        task_description = self._read_task_artifact(run_dir, persisted_task_description)
 
         plan_markdown = self._read_artifact_text(run_dir / "approved-plan.md")
         task_profile = self._read_task_profile_artifact(run_dir)

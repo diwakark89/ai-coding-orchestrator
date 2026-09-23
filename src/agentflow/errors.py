@@ -37,6 +37,14 @@ class AdapterNotFoundError(AdapterError):
     """Raised when an adapter for a specified provider is not found in the registry."""
 
 
+class AdapterAuthenticationError(AdapterError):
+    """Raised when a provider CLI reports the user is not logged in / authenticated.
+
+    Non-interactive invocations (`--print`, `exec`, etc.) cannot complete an interactive
+    login themselves, so this is surfaced distinctly from a generic non-zero exit.
+    """
+
+
 class CLIExecutionError(AdapterError):
     """Raised when provider CLI execution fails."""
 

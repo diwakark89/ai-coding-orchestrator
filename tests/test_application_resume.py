@@ -313,6 +313,35 @@ async def test_resume_with_no_worktree_yet_implements_from_persisted_plan(
 
 
 @pytest.mark.asyncio
+async def test_resume_falls_back_to_db_task_when_task_md_is_missing(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Resume must not hard-fail just because the human-readable task.md export is gone --
+    the task description is durably persisted in the `runs.task` DB column too."""
+    monkeypatch.setattr(
+        planning_module, "ask_plan_approval", lambda console_instance=None: ApprovalDecision.APPROVE
+    )
+    _prepare_repo(git_repo)
+    registry, claude, codex, gemini = make_registry()
+    app_instance = make_app(registry, tmp_path)
+
+    planning_outcome = await app_instance.run_planning("Add a health check", project_path=git_repo)
+    assert planning_outcome.state == WorkflowState.TASK_CLASSIFIED
+
+    run_dir = git_repo / ".ai-orchestrator" / "runs" / planning_outcome.run_id
+    (run_dir / "task.md").unlink()
+
+    outcome = await app_instance.run_resume(
+        planning_outcome.run_id,
+        project_path=git_repo,
+        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+    )
+
+    assert outcome.state == WorkflowState.COMPLETED
+    assert claude.calls == 1  # planning was NOT re-invoked
+
+
+@pytest.mark.asyncio
 async def test_resume_with_empty_worktree_recreates_and_implements(
     git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

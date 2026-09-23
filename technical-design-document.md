@@ -370,7 +370,7 @@ When:
 
 ```bash
 cd ~/projects/viteprep
-agentflow run "Implement referral expiry"
+agentflow plan "Implement referral expiry"
 ```
 
 AgentFlow must:
@@ -384,7 +384,7 @@ AgentFlow must:
 Equivalent explicit invocation:
 
 ```bash
-agentflow run \
+agentflow plan \
   --project ~/projects/viteprep \
   "Implement referral expiry"
 ```
@@ -1595,7 +1595,7 @@ Responsibilities:
 ## Start task
 
 ```bash
-agentflow run "Implement invitation expiry"
+agentflow plan "Implement invitation expiry"
 ```
 
 ---
@@ -1603,7 +1603,7 @@ agentflow run "Implement invitation expiry"
 ## Explicit project
 
 ```bash
-agentflow run \
+agentflow plan \
   --project ~/projects/viteprep \
   "Implement invitation expiry"
 ```

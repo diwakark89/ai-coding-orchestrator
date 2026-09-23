@@ -383,7 +383,7 @@ binary.
 | `agentflow doctor` | Checks Python/Git/CLI presence + storage | `-C/--project` |
 | `agentflow init` | Writes a starter `.ai-orchestrator/routing.yaml` | `-C/--project`, `--force` |
 | `agentflow status` | Shows active runs for the current project | `-C/--project` |
-| `agentflow run "<task>"` | **Planning only** — no code touched | `-C/--project` |
+| `agentflow plan "<task>"` | **Planning only** — no code touched | `-C/--project` |
 | `agentflow route "<task>"` | Plans, classifies, shows the routing decision — no code touched | `-C/--project`, `--override-provider`, `--override-model`, `--override-stage` |
 | `agentflow implement "<task>"` | Plan → route → implement (isolated worktree) → verify/repair | `-C/--project`, `--override-provider`, `--override-model`, `--override-stage` |
 | `agentflow complete "<task>"` | Full pipeline through review, docs, and **human approval** | `-C/--project`, `--override-provider`, `--override-model`, `--override-stage` |
@@ -393,7 +393,7 @@ binary.
 | `agentflow stats` | Local routing/verification metrics | `--all/-a` |
 
 Note `--override-provider`/`--override-model`/`--override-stage` exist on
-`route`/`implement`/`complete`/`resume` — **not** on `run` (which is planning-only and doesn't
+`route`/`implement`/`complete`/`resume` — **not** on `plan` (which is planning-only and doesn't
 route). `-C/--project` can go before or after the subcommand.
 
 `complete` never auto-pushes, auto-merges, or deploys — it stops at a final human-approval prompt.

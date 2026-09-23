@@ -19,6 +19,7 @@ from agentflow.config.models import VerificationGroup
 from agentflow.errors import ProcessExecutionError
 from agentflow.persistence.database import DatabaseManager
 from agentflow.process.executor import ProcessExecutor
+from agentflow.ui.console import ConsoleUI
 
 
 class VerificationStatus(str, Enum):
@@ -108,10 +109,14 @@ class VerificationRunner:
     """Detects applicable verification groups, runs their commands, and persists the results."""
 
     def __init__(
-        self, db_manager: DatabaseManager, executor: ProcessExecutor | None = None
+        self,
+        db_manager: DatabaseManager,
+        executor: ProcessExecutor | None = None,
+        console_ui: ConsoleUI | None = None,
     ) -> None:
         self.db_manager = db_manager
         self.executor = executor or ProcessExecutor()
+        self.ui = console_ui or ConsoleUI()
 
     async def run(
         self,
@@ -184,9 +189,10 @@ class VerificationRunner:
         # mangle Windows paths (e.g. "C:\tools\pytest.exe") embedded in a command string.
         args = shlex.split(command, posix=(os.name != "nt"))
         try:
-            proc_res = await self.executor.run(
-                cmd_args=args, cwd=worktree_path, timeout=timeout_seconds
-            )
+            async with self.ui.animate_stage(f"Verifying ({command})"):
+                proc_res = await self.executor.run(
+                    cmd_args=args, cwd=worktree_path, timeout=timeout_seconds
+                )
         except ProcessExecutionError as e:
             now = datetime.now(timezone.utc)
             cmd_result = CommandResult(

@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentflow.agents.base import AgentRequest, AgentRole
+from agentflow.agents.base import AgentRequest, AgentRole, describe_agent_failure
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.git.lock import WorktreeLock
 from agentflow.git.worktree import WorktreeDiff, WorktreeHandle, WorktreeManager
@@ -162,7 +162,8 @@ class ImplementationWorkflow:
             adapter.provider.value,
             routing_decision.model,
         )
-        result = await adapter.start(request)
+        async with self.ui.animate_stage(f"Implementing: {routing_decision.model}"):
+            result = await adapter.start(request)
 
         self.db_manager.record_agent_session(
             str(uuid.uuid4()),
@@ -175,8 +176,7 @@ class ImplementationWorkflow:
         record_agent_completed(self.db_manager, run_id, WorkflowState.IMPLEMENTING.value, result)
 
         if not result.success:
-            detail = result.stderr.strip() or result.text.strip() or "no output"
-            reason = f"Implementation agent exited with code {result.exit_code}: {detail}"
+            reason = describe_agent_failure(result, "Implementation agent")
             transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, reason)
             return ImplementationOutcome(
                 run_id=run_id,

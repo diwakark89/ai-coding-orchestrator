@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentflow.agents.base import AgentRequest, AgentRole
+from agentflow.agents.base import AgentRequest, AgentRole, describe_agent_failure
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.config.models import DocumentationConfig, VerificationGroup
 from agentflow.git.lock import WorktreeLock
@@ -159,7 +159,8 @@ class DocumentationWorkflow:
                 adapter.provider.value,
                 decision.model,
             )
-            result = await adapter.start(request)
+            async with self.ui.animate_stage(f"Documenting: {decision.model}"):
+                result = await adapter.start(request)
         finally:
             lock.release()
 
@@ -174,8 +175,7 @@ class DocumentationWorkflow:
         record_agent_completed(self.db_manager, run_id, WorkflowState.DOCUMENTING.value, result)
 
         if not result.success:
-            detail = result.stderr.strip() or result.text.strip() or "no output"
-            reason = f"Documentation agent exited with code {result.exit_code}: {detail}"
+            reason = describe_agent_failure(result, "Documentation agent")
             return DocumentationOutcome(enabled=True, blocked=True, blocker_reason=reason)
 
         diff = await self.worktree_manager.capture_changes(worktree_path)

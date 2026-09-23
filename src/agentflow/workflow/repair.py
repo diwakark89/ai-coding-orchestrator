@@ -297,7 +297,8 @@ class RepairWorkflow:
                 ref.provider_enum.value,
                 ref.model,
             )
-            result = await adapter.start(request)
+            async with self.ui.animate_stage(f"Repairing: {ref.model}"):
+                result = await adapter.start(request)
         finally:
             lock.release()
 

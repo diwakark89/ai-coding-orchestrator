@@ -12,16 +12,16 @@ class ApprovalDecision(str, Enum):
     """User decision when presented with a ready plan."""
 
     APPROVE = "approve"
-    CONTINUE_PLANNING = "continue"
+    CONTINUE_PLANNING = "revise"
     CANCEL = "cancel"
 
 
 def ask_plan_approval(console_instance: Console | None = None) -> ApprovalDecision:
-    """Prompt the user to approve, continue refining, or cancel the current plan."""
+    """Prompt the user to approve, revise, or cancel the current plan."""
     c = console_instance or console
     choice = Prompt.ask(
-        "\n[bold]Approve this plan?[/bold] (approve / continue / cancel)",
-        choices=["approve", "continue", "cancel"],
+        "\n[bold]Approve this plan?[/bold] (approve / revise / cancel)",
+        choices=["approve", "revise", "cancel"],
         default="approve",
         console=c,
     )

@@ -149,6 +149,63 @@ class AgentResult(BaseModel):
         return (self.completed_at - self.started_at).total_seconds()
 
 
+# Substrings seen in provider CLI stderr/stdout when the CLI itself is not authenticated.
+# Non-interactive invocations (`--print`, `exec`, etc.) can't complete an interactive login,
+# so this failure mode is worth distinguishing from a generic crash/exit.
+_AUTH_FAILURE_MARKERS: tuple[str, ...] = (
+    "not logged in",
+    "please run /login",
+    "please login",
+    "/login",
+    "not authenticated",
+    "authentication required",
+    "please authenticate",
+    "codex login",
+    "gemini auth login",
+    "invalid api key",
+    "no credentials found",
+    "401 unauthorized",
+    "unauthorized",
+)
+
+_PROVIDER_CLI_NAMES: dict[Provider, str] = {
+    Provider.ANTHROPIC: "claude",
+    Provider.OPENAI: "codex",
+    Provider.GOOGLE: "gemini",
+}
+
+_PROVIDER_LOGIN_HINTS: dict[Provider, str] = {
+    Provider.ANTHROPIC: "run `claude` in an interactive terminal and complete `/login`",
+    Provider.OPENAI: "run `codex login` in an interactive terminal",
+    Provider.GOOGLE: "run `gemini` in an interactive terminal and complete its login flow",
+}
+
+
+def is_authentication_failure(result: "AgentResult") -> bool:
+    """Detect known provider-CLI 'not logged in' signatures in captured stderr/stdout."""
+    haystack = f"{result.stderr}\n{result.text}".lower()
+    return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS)
+
+
+def describe_agent_failure(result: "AgentResult", agent_label: str) -> str:
+    """Build a clear, actionable message for a non-zero-exit AgentResult.
+
+    Surfaces a detected authentication failure with explicit remediation instead of
+    burying it in a generic 'exited with code N: <stderr>' wrapper.
+    """
+    detail = result.stderr.strip() or result.text.strip() or "no output"
+    if is_authentication_failure(result):
+        cli_name = _PROVIDER_CLI_NAMES.get(result.provider, result.provider.value)
+        hint = _PROVIDER_LOGIN_HINTS.get(
+            result.provider, f"log in via the `{cli_name}` CLI in an interactive terminal"
+        )
+        return (
+            f"{agent_label} is not authenticated with the '{cli_name}' CLI: {detail} -- "
+            f"{hint}, then retry."
+        )
+    return f"{agent_label} exited with code {result.exit_code}: {detail}"
+
+
 class AdapterCapabilities(BaseModel):
     """Metadata describing capabilities supported by a specific CLI adapter."""
 

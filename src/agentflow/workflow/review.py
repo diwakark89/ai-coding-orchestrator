@@ -16,11 +16,16 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentflow.agents.base import AgentRequest, AgentRole
+from agentflow.agents.base import (
+    AgentRequest,
+    AgentRole,
+    describe_agent_failure,
+    is_authentication_failure,
+)
 from agentflow.agents.parser import parse_model_into_schema
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.config.models import LimitsConfig, VerificationGroup
-from agentflow.errors import ReviewBlockedError, StructuredParsingError
+from agentflow.errors import AdapterAuthenticationError, ReviewBlockedError, StructuredParsingError
 from agentflow.git.lock import WorktreeLock
 from agentflow.git.worktree import WorktreeManager
 from agentflow.observability.events import (
@@ -384,7 +389,8 @@ class ReviewWorkflow:
                 adapter.provider.value,
                 decision.model,
             )
-            result = await adapter.start(request)
+            async with self.ui.animate_stage(f"Reviewing: {decision.model}"):
+                result = await adapter.start(request)
             self.db_manager.record_agent_session(
                 str(uuid.uuid4()),
                 run_id,
@@ -395,8 +401,10 @@ class ReviewWorkflow:
             )
             record_agent_completed(self.db_manager, run_id, WorkflowState.REVIEWING.value, result)
             if not result.success:
-                detail = result.stderr.strip() or result.text.strip() or "no output"
-                raise ReviewBlockedError(f"Reviewer exited with code {result.exit_code}: {detail}")
+                message = describe_agent_failure(result, "Reviewer")
+                if is_authentication_failure(result):
+                    raise ReviewBlockedError(message) from AdapterAuthenticationError(message)
+                raise ReviewBlockedError(message)
 
             try:
                 return parse_model_into_schema(result.text, ReviewReport)
@@ -443,7 +451,10 @@ class ReviewWorkflow:
                 implementation_decision.provider.value,
                 implementation_decision.model,
             )
-            result = await adapter.start(request)
+            async with self.ui.animate_stage(
+                f"Fixing review findings: {implementation_decision.model}"
+            ):
+                result = await adapter.start(request)
         finally:
             lock.release()
 
@@ -457,10 +468,10 @@ class ReviewWorkflow:
         )
         record_agent_completed(self.db_manager, run_id, WorkflowState.REVIEW_FIXING.value, result)
         if not result.success:
-            detail = result.stderr.strip() or result.text.strip() or "no output"
-            raise ReviewBlockedError(
-                f"Review-fix agent exited with code {result.exit_code}: {detail}"
-            )
+            message = describe_agent_failure(result, "Review-fix agent")
+            if is_authentication_failure(result):
+                raise ReviewBlockedError(message) from AdapterAuthenticationError(message)
+            raise ReviewBlockedError(message)
 
     def _write_review_artifacts(
         self,

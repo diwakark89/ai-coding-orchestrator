@@ -71,6 +71,10 @@ class ClaudeAdapter(BaseAgentAdapter):
 
         if request.read_only:
             args.extend(["--permission-mode", "plan"])
+        else:
+            # AgentFlow already holds the isolated worktree's writer lock. In
+            # non-interactive mode, Claude otherwise denies Edit and Write calls.
+            args.extend(["--permission-mode", "acceptEdits"])
 
         if session_id:
             args.extend(["--resume", session_id])

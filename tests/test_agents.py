@@ -219,6 +219,7 @@ def test_claude_adapter_build_args_resume(tmp_path: Path):
     idx = args.index("--resume")
     assert args[idx + 1] == "session-xyz-123"
     assert args[args.index("--model") + 1] == "claude-opus-5-5"
+    assert args[args.index("--permission-mode") + 1] == "acceptEdits"
 
 
 @pytest.mark.parametrize(
@@ -332,7 +333,7 @@ async def test_claude_adapter_empty_session_id_resume_raises_error(tmp_path: Pat
 
 def test_codex_adapter_build_args(tmp_path: Path):
     """CodexAdapter constructs exec argument array with model selection."""
-    adapter = CodexAdapter(command="codex")
+    adapter = CodexAdapter(command="codex", config_home=tmp_path / "empty-codex-home")
     req = AgentRequest(
         role=AgentRole.LIGHTWEIGHT_CODER,
         prompt="Fix import error",
@@ -348,6 +349,53 @@ def test_codex_adapter_build_args(tmp_path: Path):
         "gpt-6-luna",
         "Fix import error",
     ]
+
+
+def test_codex_adapter_allows_explicit_mcp_opt_in(tmp_path: Path):
+    """A request that needs MCP keeps the configured Codex servers available."""
+    config_home = tmp_path / "codex-home"
+    config_home.mkdir()
+    (config_home / "config.toml").write_text(
+        '[mcp_servers.supabase]\nurl = "https://mcp.supabase.com/mcp"\n'
+    )
+    adapter = CodexAdapter(command="codex", config_home=config_home)
+    req = AgentRequest(
+        role=AgentRole.STANDARD_CODER,
+        prompt="Inspect the configured MCP service",
+        repository_path=tmp_path,
+        model="GPT-6 Sol",
+        provider_options={"enable_mcp": True},
+    )
+
+    assert not any("mcp_servers." in arg for arg in adapter.build_args(req))
+
+
+def test_codex_adapter_disables_user_and_project_mcp_servers(tmp_path: Path):
+    """A Codex worker must not connect to ambient MCP servers at startup."""
+    config_home = tmp_path / "codex-home"
+    config_home.mkdir()
+    (config_home / "config.toml").write_text(
+        '[mcp_servers.supabase]\nurl = "https://mcp.supabase.com/mcp"\n'
+    )
+    project = tmp_path / "project"
+    project_config = project / ".codex"
+    project_config.mkdir(parents=True)
+    (project_config / "config.toml").write_text(
+        '[mcp_servers.supabase]\nurl = "https://mcp.supabase.com/mcp?project_ref=example"\n'
+        '[mcp_servers.stitch]\nurl = "https://stitch.example/mcp"\n'
+    )
+    adapter = CodexAdapter(command="codex", config_home=config_home)
+    req = AgentRequest(
+        role=AgentRole.STANDARD_CODER,
+        prompt="Implement",
+        repository_path=project,
+        working_directory=project,
+        model="GPT-6 Sol",
+    )
+
+    args = adapter.build_args(req)
+    assert args.count("mcp_servers.supabase.enabled=false") == 1
+    assert args.count("mcp_servers.stitch.enabled=false") == 1
 
 
 @pytest.mark.parametrize(

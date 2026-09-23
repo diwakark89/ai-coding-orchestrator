@@ -6,6 +6,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from agentflow.ui.progress import StageAnimator
+
 
 def configure_utf8_streams() -> None:
     """Ensure stdout and stderr handle UTF-8 characters on platforms with legacy encodings."""
@@ -67,3 +69,9 @@ class ConsoleUI:
     def print_info(self, message: str) -> None:
         """Print an informational line."""
         self.console.print(f"[bold blue]{INFOMARK}[/bold blue] {message}")
+
+    def animate_stage(
+        self, label: str, *, interval: float = 0.5, max_dots: int = 10
+    ) -> StageAnimator:
+        """Return a `StageAnimator` for `label`, wired to this UI's console."""
+        return StageAnimator(self.console, label, interval=interval, max_dots=max_dots)

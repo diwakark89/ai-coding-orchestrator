@@ -1,6 +1,10 @@
 """OpenAI Codex CLI agent adapter."""
 
 import json
+import os
+import re
+import tomllib
+from pathlib import Path
 from typing import Any
 
 from agentflow.agents.base import (
@@ -34,8 +38,10 @@ class CodexAdapter(BaseAgentAdapter):
         self,
         command: str = "codex",
         executor: ProcessExecutor | None = None,
+        config_home: Path | None = None,
     ) -> None:
         super().__init__(command=command, executor=executor)
+        self.config_home = config_home or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 
     @property
     def provider(self) -> Provider:
@@ -59,6 +65,14 @@ class CodexAdapter(BaseAgentAdapter):
         """Construct non-interactive argument array for Codex CLI."""
         args: list[str] = [self.command, "exec", "--json"]
 
+        # Codex merges CLI config overrides with user/project config. An empty table does
+        # not remove inherited MCP servers, so disable each configured server by name.
+        if request.provider_options.get("enable_mcp") is not True:
+            for name in self._configured_mcp_servers(request.effective_working_directory):
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                    raise ValueError(f"Cannot safely disable MCP server with name {name!r}")
+                args.extend(["--config", f"mcp_servers.{name}.enabled=false"])
+
         model = self._resolve_model(request.model)
         args.extend(["--model", model])
 
@@ -68,6 +82,23 @@ class CodexAdapter(BaseAgentAdapter):
         # Pass prompt safely as a single argument
         args.append(request.prompt)
         return args
+
+    def _configured_mcp_servers(self, working_directory: Path) -> list[str]:
+        """Find user and project MCP entries without reading or emitting their credentials."""
+        config_paths = [self.config_home / "config.toml"]
+        config_paths.extend(
+            parent / ".codex" / "config.toml"
+            for parent in reversed((working_directory, *working_directory.parents))
+            if parent != Path.home()
+        )
+        names: set[str] = set()
+        for path in config_paths:
+            if not path.is_file():
+                continue
+            with path.open("rb") as config_file:
+                config = tomllib.load(config_file)
+            names.update(config.get("mcp_servers", {}))
+        return sorted(names)
 
     async def resume(self, session_id: str, request: AgentRequest) -> AgentResult:
         """Explicitly reject session resume as unsupported by Codex CLI."""

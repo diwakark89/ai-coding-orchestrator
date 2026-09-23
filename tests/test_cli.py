@@ -42,6 +42,38 @@ def test_cli_version_short():
     assert f"agentflow {__version__}" in result.output
 
 
+def test_cli_help_shows_examples():
+    """Top-level --help includes a runnable example, not just the command list."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "Examples:" in result.output
+    assert "agentflow init" in result.output
+
+
+def test_cli_complete_help_shows_examples():
+    """agentflow complete --help includes runnable examples covering the override flags."""
+    result = runner.invoke(app, ["complete", "--help"])
+    assert result.exit_code == 0
+    assert "Examples:" in result.output
+    assert 'agentflow complete "Add a health check endpoint"' in result.output
+
+
+def test_cli_resume_help_shows_examples():
+    """agentflow resume --help includes a run-id example and an override example."""
+    result = runner.invoke(app, ["resume", "--help"])
+    assert result.exit_code == 0
+    assert "Examples:" in result.output
+    assert "agentflow resume RUN-AB12CD34" in result.output
+
+
+def test_cli_retire_help_shows_examples():
+    """agentflow retire --help includes both the add and --list forms."""
+    result = runner.invoke(app, ["retire", "--help"])
+    assert result.exit_code == 0
+    assert "Examples:" in result.output
+    assert "agentflow retire --list" in result.output
+
+
 def test_cli_doctor():
     """agentflow doctor executes and displays check results."""
     result = runner.invoke(app, ["doctor"])
@@ -173,8 +205,8 @@ def test_cli_init_invalid_provider_exits_nonzero():
     assert "Invalid --providers entry" in result.output
 
 
-def test_cli_run_reports_task_classified(monkeypatch):
-    """agentflow run prints artifact paths and exits 0 when planning reaches TASK_CLASSIFIED."""
+def test_cli_plan_reports_task_classified(monkeypatch):
+    """agentflow plan prints artifact paths and exits 0 when planning reaches TASK_CLASSIFIED."""
 
     async def fake_run_planning(self, task_description, project_path=None):
         return PlanningOutcome(
@@ -185,15 +217,15 @@ def test_cli_run_reports_task_classified(monkeypatch):
         )
 
     monkeypatch.setattr(Application, "run_planning", fake_run_planning)
-    result = runner.invoke(app, ["run", "Add a health check endpoint"])
+    result = runner.invoke(app, ["plan", "Add a health check endpoint"])
 
     assert result.exit_code == 0
     assert "RUN-TEST01" in result.output
     assert "TASK_CLASSIFIED" in result.output
 
 
-def test_cli_run_blocked_exits_nonzero(monkeypatch):
-    """agentflow run exits with code 1 and surfaces the blocker reason when planning is blocked."""
+def test_cli_plan_blocked_exits_nonzero(monkeypatch):
+    """agentflow plan exits with code 1 and surfaces the blocker reason when planning is blocked."""
 
     async def fake_run_planning(self, task_description, project_path=None):
         return PlanningOutcome(
@@ -203,23 +235,100 @@ def test_cli_run_blocked_exits_nonzero(monkeypatch):
         )
 
     monkeypatch.setattr(Application, "run_planning", fake_run_planning)
-    result = runner.invoke(app, ["run", "Do something impossible"])
+    result = runner.invoke(app, ["plan", "Do something impossible"])
 
     assert result.exit_code == 1
     assert "not authenticated" in result.output
 
 
-def test_cli_run_cancelled_exits_nonzero(monkeypatch):
-    """agentflow run exits with code 1 when the user cancels plan approval."""
+def test_cli_plan_cancelled_exits_nonzero(monkeypatch):
+    """agentflow plan exits with code 1 when the user cancels plan approval."""
 
     async def fake_run_planning(self, task_description, project_path=None):
         return PlanningOutcome(run_id="RUN-TEST03", state=WorkflowState.CANCELLED)
 
     monkeypatch.setattr(Application, "run_planning", fake_run_planning)
-    result = runner.invoke(app, ["run", "Add a feature"])
+    result = runner.invoke(app, ["plan", "Add a feature"])
 
     assert result.exit_code == 1
     assert "cancelled" in result.output.lower()
+
+
+def test_cli_plan_file_reads_task_description(monkeypatch, tmp_path: Path):
+    """agentflow plan --file reads the task description from disk, not the TASK argument."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("Add a health check endpoint.\n\nDetails here.\n", encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    async def fake_run_planning(self, task_description, project_path=None):
+        observed["task_description"] = task_description
+        return PlanningOutcome(run_id="RUN-TEST04", state=WorkflowState.TASK_CLASSIFIED)
+
+    monkeypatch.setattr(Application, "run_planning", fake_run_planning)
+    result = runner.invoke(app, ["plan", "--file", str(task_file)])
+
+    assert result.exit_code == 0
+    assert observed["task_description"] == "Add a health check endpoint.\n\nDetails here."
+
+
+def test_cli_plan_rejects_task_and_file_together(tmp_path: Path):
+    """Providing both the TASK argument and --file is rejected, not silently resolved."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("Add a feature.", encoding="utf-8")
+    result = runner.invoke(app, ["plan", "Add a feature", "--file", str(task_file)])
+
+    assert result.exit_code == 1
+    assert "not both" in result.output
+
+
+def test_cli_plan_rejects_neither_task_nor_file():
+    """Providing neither the TASK argument nor --file fails fast with a clear error."""
+    result = runner.invoke(app, ["plan"])
+
+    assert result.exit_code == 1
+    assert "Provide a task description" in result.output
+
+
+def test_cli_plan_file_missing_exits_nonzero(tmp_path: Path):
+    """--file pointing at a nonexistent path surfaces a clear error, not a stack trace."""
+    result = runner.invoke(app, ["plan", "--file", str(tmp_path / "nonexistent.md")])
+
+    assert result.exit_code == 1
+    assert "Could not read --file" in result.output
+
+
+def test_cli_plan_file_empty_exits_nonzero(tmp_path: Path):
+    """--file pointing at an empty (or whitespace-only) file is rejected."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("   \n\n", encoding="utf-8")
+    result = runner.invoke(app, ["plan", "--file", str(task_file)])
+
+    assert result.exit_code == 1
+    assert "is empty" in result.output
+
+
+def test_cli_implement_file_short_flag_reads_task_description(monkeypatch, tmp_path: Path):
+    """agentflow implement -f is the same option as --file on every task-taking command."""
+    task_file = tmp_path / "task.md"
+    task_file.write_text("Fix flaky test.", encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    async def fake_run_implementation(
+        self, task_description, project_path=None, role_override=None
+    ):
+        observed["task_description"] = task_description
+        return ImplementationRunOutcome(
+            planning_outcome=PlanningOutcome(
+                run_id="RUN-TEST05", state=WorkflowState.TASK_CLASSIFIED
+            ),
+            state=WorkflowState.BLOCKED,
+            blocker_reason="stopped for test",
+        )
+
+    monkeypatch.setattr(Application, "run_implementation", fake_run_implementation)
+    runner.invoke(app, ["implement", "-f", str(task_file)])
+
+    assert observed["task_description"] == "Fix flaky test."
 
 
 def test_cli_route_displays_decision_and_exits_zero(monkeypatch):

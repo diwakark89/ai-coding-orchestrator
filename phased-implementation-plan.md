@@ -642,7 +642,7 @@ Persist every state transition.
 Command:
 
 ```bash
-agentflow run "task description"
+agentflow plan "task description"
 ```
 
 For Phase 3:
@@ -842,7 +842,7 @@ Tests must cover:
 Manual workflow:
 
 ```bash
-agentflow run "Add a simple endpoint"
+agentflow plan "Add a simple endpoint"
 ```
 
 must end with:
@@ -2130,7 +2130,7 @@ No external telemetry service required.
 When all phases are complete:
 
 ```text
-agentflow run "Implement referral expiration"
+agentflow plan "Implement referral expiration"
 ```
 
 must perform:
