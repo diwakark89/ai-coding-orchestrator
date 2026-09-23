@@ -37,7 +37,7 @@ def test_model_ref_rejects_unknown_provider():
 def test_models_config_resolve_dotted_alias():
     """ModelsConfig.resolve looks up a dotted alias like 'implementation.lightweight'."""
     ref = DEFAULT_MODELS_CONFIG.resolve("implementation.lightweight")
-    assert ref.model == "GPT-5.6 Luna"
+    assert ref.model == "GPT-6 Luna"
     assert ref.provider_enum == Provider.OPENAI
 
 
@@ -53,6 +53,31 @@ def test_models_config_resolve_malformed_alias_raises():
         DEFAULT_MODELS_CONFIG.resolve("not-dotted")
 
 
+def test_models_config_resolve_applies_retirement():
+    """ModelsConfig.resolve substitutes a retired model with its replacement."""
+    ref = DEFAULT_MODELS_CONFIG.resolve(
+        "implementation.lightweight", retired={"gpt-6 luna": "GPT-6 Sol"}
+    )
+    assert ref.model == "GPT-6 Sol"
+    assert ref.provider == "openai"
+
+
+def test_models_config_resolve_retirement_no_match_unchanged():
+    """A retirement map that doesn't mention the resolved model changes nothing."""
+    ref = DEFAULT_MODELS_CONFIG.resolve(
+        "implementation.lightweight", retired={"claude sonnet 5": "Claude Opus 5.5"}
+    )
+    assert ref.model == "GPT-6 Luna"
+
+
+def test_models_config_resolve_retirement_to_excluded_model_raises():
+    """Substituting to a model excluded from the V1 pool is rejected, not silently applied."""
+    with pytest.raises(ValueError, match="excluded"):
+        DEFAULT_MODELS_CONFIG.resolve(
+            "implementation.lightweight", retired={"gpt-6 luna": "GPT-5.6 Sol"}
+        )
+
+
 def test_complexity_rule_when_rejects_invalid_level():
     """ComplexityRuleWhen rejects a complexity value outside low/medium/high."""
     with pytest.raises(ValidationError):
@@ -61,14 +86,14 @@ def test_complexity_rule_when_rejects_invalid_level():
 
 def test_role_override_for_stage_returns_matching_override():
     """RoleOverride.for_stage returns the ModelRef registered for that stage."""
-    ref = ModelRef(provider="openai", model="GPT-5.6 Terra")
+    ref = ModelRef(provider="openai", model="GPT-6 Sol")
     override = RoleOverride(overrides={Stage.IMPLEMENTATION: ref})
     assert override.for_stage(Stage.IMPLEMENTATION) == ref
 
 
 def test_role_override_for_stage_returns_none_when_unscoped():
     """RoleOverride.for_stage returns None for a stage that wasn't overridden."""
-    ref = ModelRef(provider="openai", model="GPT-5.6 Terra")
+    ref = ModelRef(provider="openai", model="GPT-6 Sol")
     override = RoleOverride(overrides={Stage.IMPLEMENTATION: ref})
     assert override.for_stage(Stage.REVIEW) is None
     assert override.for_stage(Stage.DOCUMENTATION) is None

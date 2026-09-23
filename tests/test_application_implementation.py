@@ -173,7 +173,7 @@ async def test_full_pipeline_succeeds_without_repair(
         (worktree / "feature.py").write_text("print('hi')\n", encoding="utf-8")
 
     codex = ScriptedCodexAdapter(
-        [(make_agent_result(Provider.OPENAI, "gpt-5.6-luna"), write_feature)]
+        [(make_agent_result(Provider.OPENAI, "gpt-6-luna"), write_feature)]
     )
     registry.register(Provider.OPENAI, codex)
 
@@ -189,7 +189,7 @@ async def test_full_pipeline_succeeds_without_repair(
     assert not (git_repo / "feature.py").exists()
     assert outcome.verification_path is not None and outcome.verification_path.exists()
     assert outcome.routing_decision is not None
-    assert outcome.routing_decision.model == "GPT-5.6 Luna"
+    assert outcome.routing_decision.model == "GPT-6 Luna"
     assert codex.calls == 1
 
     run = app_instance.db_manager.get_run(outcome.planning_outcome.run_id)
@@ -251,8 +251,8 @@ async def test_pipeline_repairs_a_failing_verification(
 
     codex = ScriptedCodexAdapter(
         [
-            (make_agent_result(Provider.OPENAI, "gpt-5.6-luna"), write_feature),
-            (make_agent_result(Provider.OPENAI, "gpt-5.6-luna"), write_status_flag),
+            (make_agent_result(Provider.OPENAI, "gpt-6-luna"), write_feature),
+            (make_agent_result(Provider.OPENAI, "gpt-6-luna"), write_status_flag),
         ]
     )
     registry.register(Provider.OPENAI, codex)

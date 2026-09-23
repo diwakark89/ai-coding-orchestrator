@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agentflow.config.loader import load_global_config, load_project_config
+from agentflow.config.loader import load_global_config, load_project_config, save_global_config
 from agentflow.config.models import GlobalConfig
 from agentflow.errors import ConfigurationError
 
@@ -38,6 +38,46 @@ def test_tilde_expansion():
     assert str(config.storage.database).endswith("custom/db.sqlite".replace("/", "\\")) or str(
         config.storage.database
     ).endswith("custom/db.sqlite")
+
+
+def test_global_config_models_retired_defaults_empty():
+    """GlobalConfig.models.retired defaults to an empty mapping."""
+    config = GlobalConfig()
+    assert config.models.retired == {}
+
+
+def test_save_global_config_round_trips_other_sections(tmp_path: Path):
+    """save_global_config preserves every existing section when only retirements change."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+version: 1
+
+cli:
+  codex:
+    command: codex-custom
+
+storage:
+  database: /data/agentflow.db
+""",
+        encoding="utf-8",
+    )
+    config = load_global_config(config_file)
+    config.models.retired = {"gpt-5.6 terra": "GPT-6 Sol"}
+    save_global_config(config, config_file)
+
+    reloaded = load_global_config(config_file)
+    assert reloaded.cli.codex.command == "codex-custom"
+    assert str(reloaded.storage.database).replace("\\", "/").endswith("/data/agentflow.db")
+    assert reloaded.models.retired == {"gpt-5.6 terra": "GPT-6 Sol"}
+
+
+def test_save_global_config_default_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """save_global_config writes to the default path when none is given, creating parents."""
+    target = tmp_path / "nested" / "config.yaml"
+    monkeypatch.setenv("AGENTFLOW_CONFIG_PATH", str(target))
+    save_global_config(GlobalConfig())
+    assert target.is_file()
 
 
 def test_load_global_config_missing_file(tmp_path: Path):
@@ -207,14 +247,14 @@ models:
       model: Claude Sonnet 5
     architecture:
       provider: anthropic
-      model: Claude Opus 5
+      model: Claude Opus 5.5
   implementation:
     lightweight:
       provider: openai
-      model: GPT-5.6 Luna
+      model: GPT-6 Luna
     standard:
       provider: openai
-      model: GPT-5.6 Terra
+      model: GPT-6 Sol
     escalation:
       provider: anthropic
       model: Claude Sonnet 5
@@ -227,7 +267,7 @@ models:
       model: Claude Sonnet 5
     architecture:
       provider: anthropic
-      model: Claude Opus 5
+      model: Claude Opus 5.5
   documentation:
     default:
       provider: google
@@ -281,7 +321,7 @@ verification:
 
     cfg = load_project_config(project_config_file)
     assert cfg.models is not None
-    assert cfg.models.implementation.lightweight.model == "GPT-5.6 Luna"
+    assert cfg.models.implementation.lightweight.model == "GPT-6 Luna"
     assert cfg.complexity is not None
     assert cfg.complexity.flags["payment"] == 3
     assert cfg.routing is not None

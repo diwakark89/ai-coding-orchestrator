@@ -12,9 +12,11 @@ from agentflow.application import (
     ImplementationRunOutcome,
     InitResult,
     PipelineOutcome,
+    RetirementReport,
     RoutingOutcome,
 )
 from agentflow.cli import app
+from agentflow.errors import ConfigurationError
 from agentflow.observability.metrics import StatisticsReport
 from agentflow.routing.complexity import ComplexityLevel
 from agentflow.routing.decision import RoutingDecision
@@ -228,7 +230,7 @@ def test_cli_route_displays_decision_and_exits_zero(monkeypatch):
         decision = RoutingDecision(
             stage=Stage.IMPLEMENTATION,
             provider=Provider.OPENAI,
-            model="GPT-5.6 Terra",
+            model="GPT-6 Sol",
             role="implementation.standard",
             matched_rule="implementation.force-standard",
             reason="Authorization requires the standard tier.",
@@ -246,7 +248,7 @@ def test_cli_route_displays_decision_and_exits_zero(monkeypatch):
     result = runner.invoke(app, ["route", "Add a secured endpoint"])
 
     assert result.exit_code == 0
-    assert "GPT-5.6 Terra" in result.output
+    assert "GPT-6 Sol" in result.output
     assert "implementation.force-standard" in result.output
 
 
@@ -472,3 +474,103 @@ def test_cli_cleanup_renders_report(monkeypatch):
     report = received["report"]
     assert isinstance(report, CleanupReport)
     assert report.worktrees_removed == ["RUN-OLD"]
+
+
+def test_cli_retire_adds_mapping(monkeypatch):
+    """agentflow retire OLD NEW adds the mapping and prints a confirmation table."""
+    observed: dict[str, object] = {}
+
+    def fake_run_retire(self, old_model, new_model):
+        observed["old_model"] = old_model
+        observed["new_model"] = new_model
+        return RetirementReport(retired={"gpt-5.6 terra": "GPT-6 Sol"})
+
+    monkeypatch.setattr(Application, "run_retire", fake_run_retire)
+    result = runner.invoke(app, ["retire", "GPT-5.6 Terra", "GPT-6 Sol"])
+
+    assert result.exit_code == 0
+    assert observed == {"old_model": "GPT-5.6 Terra", "new_model": "GPT-6 Sol"}
+    assert "retired" in result.output.lower()
+    assert "GPT-6 Sol" in result.output
+
+
+def test_cli_retire_rejects_excluded_replacement(monkeypatch):
+    """A replacement excluded from the V1 pool surfaces a clear error, not a stack trace."""
+
+    def fake_run_retire(self, old_model, new_model):
+        raise ConfigurationError(f"Model '{new_model}' is explicitly excluded from AgentFlow V1.")
+
+    monkeypatch.setattr(Application, "run_retire", fake_run_retire)
+    result = runner.invoke(app, ["retire", "Foo", "GPT-5.6 Sol"])
+
+    assert result.exit_code == 1
+    assert "explicitly excluded" in result.output
+
+
+def test_cli_retire_rejects_cycle(monkeypatch):
+    """A retirement that would create a cycle is rejected with a clear error."""
+
+    def fake_run_retire(self, old_model, new_model):
+        raise ConfigurationError(f"Cannot retire '{old_model}' to '{new_model}': cycle.")
+
+    monkeypatch.setattr(Application, "run_retire", fake_run_retire)
+    result = runner.invoke(app, ["retire", "GPT-6 Sol", "GPT-6 Luna"])
+
+    assert result.exit_code == 1
+    assert "cycle" in result.output
+
+
+def test_cli_retire_list(monkeypatch):
+    """agentflow retire --list renders current retirements without mutating anything."""
+
+    def fake_list_retirements(self):
+        return RetirementReport(retired={"gpt-5.6 terra": "GPT-6 Sol"})
+
+    monkeypatch.setattr(Application, "list_retirements", fake_list_retirements)
+    result = runner.invoke(app, ["retire", "--list"])
+
+    assert result.exit_code == 0
+    assert "gpt-5.6 terra" in result.output
+    assert "GPT-6 Sol" in result.output
+
+
+def test_cli_retire_list_empty(monkeypatch):
+    """agentflow retire --list reports when nothing is retired."""
+    monkeypatch.setattr(Application, "list_retirements", lambda self: RetirementReport())
+    result = runner.invoke(app, ["retire", "--list"])
+
+    assert result.exit_code == 0
+    assert "No models are currently retired" in result.output
+
+
+def test_cli_retire_remove(monkeypatch):
+    """agentflow retire --remove un-retires a model and confirms."""
+    observed: dict[str, object] = {}
+
+    def fake_remove(self, old_model):
+        observed["old_model"] = old_model
+        return True
+
+    monkeypatch.setattr(Application, "remove_retirement", fake_remove)
+    result = runner.invoke(app, ["retire", "--remove", "GPT-5.6 Terra"])
+
+    assert result.exit_code == 0
+    assert observed["old_model"] == "GPT-5.6 Terra"
+    assert "no longer retired" in result.output
+
+
+def test_cli_retire_remove_not_found(monkeypatch):
+    """Removing a retirement that doesn't exist warns instead of erroring."""
+    monkeypatch.setattr(Application, "remove_retirement", lambda self, old_model: False)
+    result = runner.invoke(app, ["retire", "--remove", "Nonexistent Model"])
+
+    assert result.exit_code == 0
+    assert "was not retired" in result.output
+
+
+def test_cli_retire_missing_arguments_exits_nonzero():
+    """agentflow retire with neither a pair of models nor --list/--remove fails fast."""
+    result = runner.invoke(app, ["retire"])
+
+    assert result.exit_code == 1
+    assert "Provide both" in result.output

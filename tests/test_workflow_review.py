@@ -90,7 +90,7 @@ def make_implementation_decision() -> RoutingDecision:
     return RoutingDecision(
         stage=Stage.IMPLEMENTATION,
         provider=Provider.OPENAI,
-        model="GPT-5.6 Luna",
+        model="GPT-6 Luna",
         role="implementation.lightweight",
         matched_rule="low-complexity",
         reason="test",
@@ -250,7 +250,7 @@ async def test_role_override_for_review_bypasses_default_routing(git_repo: Path,
         ScriptedAdapter(Provider.OPENAI, [make_result(review_payload("APPROVED"))]),
     )
     override = RoleOverride(
-        overrides={Stage.REVIEW: ModelRef(provider="openai", model="GPT-5.6 Terra")}
+        overrides={Stage.REVIEW: ModelRef(provider="openai", model="GPT-6 Sol")}
     )
 
     workflow = ReviewWorkflow(
@@ -274,12 +274,12 @@ async def test_role_override_for_review_bypasses_default_routing(git_repo: Path,
     )
 
     assert outcome.state == WorkflowState.REVIEW_APPROVED
-    assert outcome.reviewer_model == "GPT-5.6 Terra"
+    assert outcome.reviewer_model == "GPT-6 Sol"
 
 
 @pytest.mark.asyncio
 async def test_architecture_review_selected_for_architecture_change(git_repo: Path, tmp_path: Path):
-    """A task with architecture_change=true routes to the architecture reviewer (Claude Opus 5)."""
+    """A task with architecture_change=true routes to the architecture reviewer (Opus 5.5)."""
     db, ctx, task_profile, worktree_manager, worktree_path = await make_environment(
         git_repo, tmp_path, architecture_change=True
     )
@@ -308,7 +308,7 @@ async def test_architecture_review_selected_for_architecture_change(git_repo: Pa
         passed_verification(),
     )
 
-    assert outcome.reviewer_model == "Claude Opus 5"
+    assert outcome.reviewer_model == "Claude Opus 5.5"
 
 
 # --- 3. Mandatory-fix cycle ------------------------------------------------------------------

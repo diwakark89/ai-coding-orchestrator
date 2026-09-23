@@ -77,7 +77,7 @@ Given the same `TaskProfile` and routing configuration, the same routing result 
 
 The orchestrator source code MUST NOT contain assumptions such as:
 
-- Java → Terra
+- Java → Sol
 - React → Luna
 - Spring Boot → specific model
 - PostgreSQL → specific model
@@ -131,14 +131,14 @@ The following model pool is FINALIZED for V1.
 | Responsibility                    | Model            |
 | --------------------------------- | ---------------- |
 | Default interactive planning      | Claude Sonnet 5  |
-| Architecture / ambiguous planning | Claude Opus 5    |
-| Low-complexity implementation     | GPT-5.6 Luna     |
-| Standard implementation           | GPT-5.6 Terra    |
-| High-complexity implementation    | GPT-5.6 Terra    |
+| Architecture / ambiguous planning | Claude Opus 5.5    |
+| Low-complexity implementation     | GPT-6 Luna     |
+| Standard implementation           | GPT-6 Sol    |
+| High-complexity implementation    | GPT-6 Sol    |
 | Implementation escalation         | Claude Sonnet 5  |
 | Independent default review        | Gemini 3.8 Flash |
 | Deep code review                  | Claude Sonnet 5  |
-| Architecture-critical review      | Claude Opus 5    |
+| Architecture-critical review      | Claude Opus 5.5    |
 | Documentation                     | Gemini 3.8 Flash |
 
 Explicitly excluded:
@@ -548,7 +548,7 @@ Sonnet must:
 
 ## 13.2 Opus Escalation
 
-Claude Opus 5 is used when planning identifies:
+Claude Opus 5.5 is used when planning identifies:
 
 - architecture changes;
 - new services;
@@ -739,7 +739,7 @@ Authorization: true
 Result:
 
 ```text
-GPT-5.6 Terra
+GPT-6 Sol
 ```
 
 not Luna.
@@ -772,22 +772,22 @@ LOW
 +
 no hard-risk flags
       ↓
-GPT-5.6 Luna
+GPT-6 Luna
 ```
 
 ```text
 MEDIUM
       ↓
-GPT-5.6 Terra
+GPT-6 Sol
 ```
 
 ```text
 HIGH
       ↓
-GPT-5.6 Terra
+GPT-6 Sol
 ```
 
-Terra may use stronger CLI reasoning configuration where supported for HIGH tasks.
+Sol may use stronger CLI reasoning configuration where supported for HIGH tasks.
 
 ---
 
@@ -798,7 +798,7 @@ Default escalation chain:
 ```text
 Luna
   ↓
-Terra
+Sol
   ↓
 Sonnet 5
 ```
@@ -808,7 +808,7 @@ If the problem is identified as architectural:
 ```text
 Implementation blocked
       ↓
-Opus 5 planning
+Opus 5.5 planning
       ↓
 Updated plan
       ↓
@@ -837,7 +837,7 @@ Use Sonnet 5 for deeper review when code affects:
 - data ownership;
 - security-sensitive behavior.
 
-Use Opus 5 for architecture review where:
+Use Opus 5.5 for architecture review where:
 
 ```text
 architecture_change = true
@@ -903,16 +903,16 @@ models:
 
     architecture:
       provider: anthropic
-      model: opus-5
+      model: opus-5-5
 
   implementation:
     lightweight:
       provider: openai
-      model: gpt-5.6-luna
+      model: gpt-6-luna
 
     standard:
       provider: openai
-      model: gpt-5.6-terra
+      model: gpt-6-sol
 
     escalation:
       provider: anthropic
@@ -929,7 +929,7 @@ models:
 
     architecture:
       provider: anthropic
-      model: opus-5
+      model: opus-5-5
 
   documentation:
     default:
@@ -1097,7 +1097,7 @@ implementation.force-standard
 
 Selected:
 Provider: OpenAI
-Model:    GPT-5.6 Terra
+Model:    GPT-6 Sol
 
 Reason:
 Concurrency and idempotency require at least
@@ -1353,7 +1353,7 @@ Examples appropriate for Luna:
 - simple type mismatch;
 - localized test fixture issue.
 
-Examples requiring Terra:
+Examples requiring Sol:
 
 - incorrect business logic;
 - transaction failure;
@@ -1872,7 +1872,7 @@ Store structured local events:
   "stage": "IMPLEMENTATION",
   "event": "AGENT_STARTED",
   "provider": "openai",
-  "model": "gpt-5.6-terra"
+  "model": "gpt-6-sol"
 }
 ```
 
@@ -2028,7 +2028,7 @@ Implement:
 - Git worktree creation;
 - unique task branch;
 - Luna invocation;
-- Terra invocation;
+- Sol invocation;
 - write locking;
 - diff capture.
 
@@ -2042,7 +2042,7 @@ Implement:
 - command-result persistence;
 - simple failure classification;
 - repair loop;
-- Luna → Terra escalation;
+- Luna → Sol escalation;
 - retry limits.
 
 ---
@@ -2120,7 +2120,7 @@ Given a valid TaskProfile:
 AgentFlow can invoke:
 
 - Luna;
-- Terra;
+- Sol;
 
 through Codex CLI based on routing.
 

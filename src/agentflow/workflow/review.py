@@ -9,6 +9,7 @@ requires a full verification re-run before another review pass.
 """
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -178,6 +179,7 @@ class ReviewWorkflow:
         console_ui: ConsoleUI | None = None,
         max_malformed_retries: int = 2,
         role_override: RoleOverride | None = None,
+        retired_models: Mapping[str, str] | None = None,
     ) -> None:
         self.db_manager = db_manager
         self.agent_registry = agent_registry
@@ -189,6 +191,7 @@ class ReviewWorkflow:
         self.ui = console_ui or ConsoleUI()
         self.max_malformed_retries = max_malformed_retries
         self.role_override = role_override
+        self.retired_models = retired_models
 
     async def run(
         self,
@@ -216,6 +219,7 @@ class ReviewWorkflow:
                 user_override=(
                     self.role_override.for_stage(Stage.REVIEW) if self.role_override else None
                 ),
+                retired_models=self.retired_models,
             )
             self.db_manager.record_routing_decision(
                 str(uuid.uuid4()),

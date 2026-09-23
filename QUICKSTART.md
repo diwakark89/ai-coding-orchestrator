@@ -189,15 +189,15 @@ the two FastAPI services):
          model: Claude Sonnet 5
        architecture:
          provider: anthropic
-         model: Claude Opus 5
+         model: Claude Opus 5.5
 
      implementation:
        lightweight:
          provider: openai
-         model: GPT-5.6 Luna
+         model: GPT-6 Luna
        standard:
          provider: openai
-         model: GPT-5.6 Terra
+         model: GPT-6 Sol
        escalation:
          provider: anthropic
          model: Claude Sonnet 5
@@ -211,7 +211,7 @@ the two FastAPI services):
          model: Claude Sonnet 5
        architecture:
          provider: anthropic
-         model: Claude Opus 5
+         model: Claude Opus 5.5
 
      documentation:
        default:
@@ -527,7 +527,7 @@ Continuing the §6 scenario — Claude's usage limit got hit mid-implementation,
 — resume it straight onto a fallback provider for that stage:
 
 ```bash
-agentflow -C "..\skillify" resume RUN-AB12CD34 --override-provider openai --override-model "GPT-5.6 Terra" --override-stage implementation
+agentflow -C "..\skillify" resume RUN-AB12CD34 --override-provider openai --override-model "GPT-6 Sol" --override-stage implementation
 ```
 
 If the limit was hit during review instead (e.g. a security-flagged change escalated review to

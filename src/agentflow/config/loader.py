@@ -62,6 +62,19 @@ def load_global_config(path: Path | str | None = None) -> GlobalConfig:
         ) from e
 
 
+def save_global_config(config: GlobalConfig, path: Path | str | None = None) -> None:
+    """Write the global configuration file, preserving every field on `config`.
+
+    Callers that want to change one section (e.g. `models.retired`) should first
+    `load_global_config()` to get the full current object, mutate that section, then pass
+    the whole object here -- this always writes the complete file, never a partial merge.
+    """
+    config_path = Path(path).expanduser() if path else get_default_global_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    data = config.model_dump(mode="json", exclude_none=True)
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
 def load_project_config(path: Path | str) -> ProjectConfig:
     """Load and validate a project routing configuration file (.ai-orchestrator/routing.yaml)."""
     config_path = Path(path).resolve()

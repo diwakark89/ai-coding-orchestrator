@@ -31,8 +31,8 @@ from agentflow.routing.rules import (
 # (low-tier model, high-tier model) per provider. Google has only one model in the V1 pool, so
 # its "tiers" are identical -- there is no way to give it real escalation headroom.
 _PROVIDER_TIERS: dict[Provider, tuple[str, str]] = {
-    Provider.ANTHROPIC: ("Claude Sonnet 5", "Claude Opus 5"),
-    Provider.OPENAI: ("GPT-5.6 Luna", "GPT-5.6 Terra"),
+    Provider.ANTHROPIC: ("Claude Sonnet 5", "Claude Opus 5.5"),
+    Provider.OPENAI: ("GPT-6 Luna", "GPT-6 Sol"),
     Provider.GOOGLE: ("Gemini 3.8 Flash", "Gemini 3.8 Flash"),
 }
 

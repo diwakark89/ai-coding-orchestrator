@@ -585,7 +585,7 @@ The application can invoke all three provider CLIs through the same internal int
 Implement the planning workflow using:
 
 - Claude Sonnet 5 by default;
-- Claude Opus 5 for architecture escalation;
+- Claude Opus 5.5 for architecture escalation;
 - interactive user decisions;
 - approved plan artifact;
 - machine-readable TaskProfile.
@@ -1009,14 +1009,14 @@ Planning:
 
 ```text
 Claude Sonnet 5
-Claude Opus 5
+Claude Opus 5.5
 ```
 
 Implementation:
 
 ```text
-GPT-5.6 Luna
-GPT-5.6 Terra
+GPT-6 Luna
+GPT-6 Sol
 Claude Sonnet 5
 ```
 
@@ -1025,7 +1025,7 @@ Review/documentation:
 ```text
 Gemini 3.8 Flash
 Claude Sonnet 5
-Claude Opus 5
+Claude Opus 5.5
 ```
 
 Do not include:
@@ -1074,7 +1074,7 @@ Risk flags:
 - idempotency
 
 Selected:
-OpenAI / GPT-5.6 Terra
+OpenAI / GPT-6 Sol
 ```
 
 ---
@@ -1120,7 +1120,7 @@ normal business logic
 Expected:
 
 ```text
-Terra
+Sol
 ```
 
 ### Case C
@@ -1133,7 +1133,7 @@ authorization=true
 Expected:
 
 ```text
-Terra
+Sol
 ```
 
 ### Case D
@@ -1146,7 +1146,7 @@ idempotency=true
 Expected:
 
 ```text
-Terra
+Sol
 ```
 
 ### Case E
@@ -1267,11 +1267,11 @@ V1:
 
 ```text
 LOW → Luna
-MEDIUM → Terra
-HIGH → Terra
+MEDIUM → Sol
+HIGH → Sol
 ```
 
-Hard-risk always at least Terra.
+Hard-risk always at least Sol.
 
 ---
 
@@ -1472,7 +1472,7 @@ Examples:
 Complex failures:
 
 ```text
-Terra
+Sol
 ```
 
 Examples:
@@ -1490,11 +1490,11 @@ Examples:
 
 ```text
 Luna repair fails twice
-→ Terra
+→ Sol
 ```
 
 ```text
-Terra repeatedly fails
+Sol repeatedly fails
 → Sonnet
 ```
 
@@ -1535,8 +1535,8 @@ Automated fixture scenarios:
 - lint failure;
 - timeout;
 - repair succeeds first time;
-- Luna fails twice → Terra;
-- Terra fails configured limit → escalation;
+- Luna fails twice → Sol;
+- Sol fails configured limit → escalation;
 - final verification re-runs complete sequence.
 
 No AI-generated statement may mark verification successful.
@@ -1602,7 +1602,7 @@ when risk includes configured sensitive areas.
 Architecture review:
 
 ```text
-Claude Opus 5
+Claude Opus 5.5
 ```
 
 when architecture changed.
@@ -2058,7 +2058,7 @@ Example:
   "stage": "IMPLEMENTATION",
   "event": "AGENT_STARTED",
   "provider": "openai",
-  "model": "gpt-5.6-terra"
+  "model": "gpt-6-sol"
 }
 ```
 
@@ -2098,7 +2098,7 @@ Tasks: 24
 First-pass verification: 87%
 Escalations: 3
 
-Terra
+Sol
 Tasks: 18
 First-pass verification: 94%
 ```
@@ -2150,7 +2150,7 @@ TaskProfile
       ↓
 Deterministic routing
       ↓
-Luna or Terra
+Luna or Sol
       ↓
 Git worktree implementation
       ↓
@@ -2182,16 +2182,16 @@ Planning default
 → Claude Sonnet 5
 
 Architecture planning
-→ Claude Opus 5
+→ Claude Opus 5.5
 
 Low-complexity implementation
-→ GPT-5.6 Luna
+→ GPT-6 Luna
 
 Medium implementation
-→ GPT-5.6 Terra
+→ GPT-6 Sol
 
 High implementation
-→ GPT-5.6 Terra
+→ GPT-6 Sol
 
 Implementation escalation
 → Claude Sonnet 5
@@ -2203,7 +2203,7 @@ Deep review
 → Claude Sonnet 5
 
 Architecture review
-→ Claude Opus 5
+→ Claude Opus 5.5
 
 Documentation
 → Gemini 3.8 Flash
@@ -2264,7 +2264,7 @@ AgentFlow V1 is complete when:
 5. Opus can handle architecture escalation.
 6. TaskProfile generation is schema-validated.
 7. Model routing is deterministic and explainable.
-8. Luna and Terra can implement through Codex CLI.
+8. Luna and Sol can implement through Codex CLI.
 9. Implementation occurs in isolated Git worktrees.
 10. Real project verification determines success.
 11. Repair and escalation have bounded retry loops.

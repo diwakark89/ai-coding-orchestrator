@@ -13,12 +13,19 @@ from pathlib import Path
 import yaml
 from rich.table import Table
 
-from agentflow.agents.base import Provider
+from agentflow.agents.base import Provider, validate_model_allowed
 from agentflow.agents.registry import AgentAdapterRegistry, create_default_registry
 from agentflow.concurrency.run_lock import RunLock
-from agentflow.config.loader import load_global_config
+from agentflow.config.loader import load_global_config, save_global_config
 from agentflow.config.models import GlobalConfig, ProjectConfig
-from agentflow.errors import InitError, ProjectNotFoundError, ResumeError, WorktreeError
+from agentflow.config.retirement import apply_retirements
+from agentflow.errors import (
+    ConfigurationError,
+    InitError,
+    ProjectNotFoundError,
+    ResumeError,
+    WorktreeError,
+)
 from agentflow.git.lock import WorktreeLock
 from agentflow.git.worktree import WorktreeHandle, WorktreeManager
 from agentflow.observability.metrics import StatisticsReport, StatisticsService
@@ -138,6 +145,13 @@ class InitResult:
 
 
 @dataclass
+class RetirementReport:
+    """Current `agentflow retire` state: retired model name -> replacement model name."""
+
+    retired: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class CleanupReport:
     """Result of `agentflow cleanup`: what was removed, and what was left untouched."""
 
@@ -245,9 +259,7 @@ class Application:
                     if not first_line and res.stderr.strip():
                         first_line = res.stderr.strip().splitlines()[0]
                     details = (
-                        f"Found: {cli_path} ({first_line})"
-                        if first_line
-                        else f"Found: {cli_path}"
+                        f"Found: {cli_path} ({first_line})" if first_line else f"Found: {cli_path}"
                     )
                     result = DoctorCheckItem(
                         name=f"{provider_name} CLI",
@@ -520,9 +532,7 @@ class Application:
         routing_path = ctx.root_path / ROUTING_CONFIG_RELATIVE_PATH
         already_existed = routing_path.exists()
         if already_existed and not force:
-            raise InitError(
-                f"{routing_path} already exists. Pass --force to overwrite it."
-            )
+            raise InitError(f"{routing_path} already exists. Pass --force to overwrite it.")
 
         resolved_providers = (
             providers if providers is not None else self._detect_available_providers()
@@ -549,6 +559,63 @@ class Application:
             overwritten=already_existed,
             providers=sorted(p.value for p in resolved_providers),
         )
+
+    def run_retire(self, old_model: str, new_model: str) -> RetirementReport:
+        """Persist a global model retirement: every project's routing transparently substitutes
+        `new_model` for `old_model` from now on (routing/rules.py `ModelsConfig.resolve`),
+        without touching any project's `.ai-orchestrator/routing.yaml`.
+        """
+        try:
+            validate_model_allowed(new_model)
+        except ValueError as e:
+            raise ConfigurationError(str(e)) from e
+        retired = dict(self.config.models.retired)
+        old_key = old_model.strip().lower()
+
+        # Reject a mapping that would create a cycle: if new_model already chain-resolves
+        # back to old_model, adding old_model -> new_model would close the loop.
+        probe = dict(retired)
+        probe[old_key] = new_model
+        try:
+            apply_retirements(old_model, probe)
+        except ConfigurationError as e:
+            raise ConfigurationError(
+                f"Cannot retire '{old_model}' to '{new_model}': this would create a "
+                f"retirement cycle."
+            ) from e
+
+        retired[old_key] = new_model
+        self.config.models.retired = retired
+        save_global_config(self.config)
+        return RetirementReport(retired=dict(self.config.models.retired))
+
+    def list_retirements(self) -> RetirementReport:
+        """Return the current global model retirements."""
+        return RetirementReport(retired=dict(self.config.models.retired))
+
+    def remove_retirement(self, old_model: str) -> bool:
+        """Un-retire `old_model`. Returns False (no-op) if it wasn't retired."""
+        old_key = old_model.strip().lower()
+        retired = dict(self.config.models.retired)
+        if old_key not in retired:
+            return False
+        del retired[old_key]
+        self.config.models.retired = retired
+        save_global_config(self.config)
+        return True
+
+    def render_retirements(self, report: RetirementReport) -> None:
+        """Render the current global model retirements as a table."""
+        self.ui.print_header("Model Retirements", "Applied globally across every project.")
+        if not report.retired:
+            self.ui.print_info("No models are currently retired.")
+            return
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Retired model")
+        table.add_column("Replacement")
+        for old, new in sorted(report.retired.items()):
+            table.add_row(old, new)
+        self.ui.console.print(table)
 
     def get_status_message(self, project_path: Path | None = None) -> str:
         """Get status message for active runs."""
@@ -596,6 +663,7 @@ class Application:
             models_config=models_cfg,
             routing_rules=routing_rules_cfg,
             console_ui=self.ui,
+            retired_models=self.config.models.retired,
         )
         try:
             return await workflow.run(task_description, ctx, run_id=run_id)
@@ -620,6 +688,7 @@ class Application:
             user_override=(
                 role_override.for_stage(Stage.IMPLEMENTATION) if role_override else None
             ),
+            retired_models=self.config.models.retired,
         )
 
         if planning_outcome.plan_path is not None:
@@ -795,6 +864,7 @@ class Application:
                 models_cfg,
                 limits,
                 self.ui,
+                retired_models=self.config.models.retired,
             )
             repair = await repair_workflow.run(
                 run_id,
@@ -951,6 +1021,7 @@ class Application:
             limits,
             self.ui,
             role_override=role_override,
+            retired_models=self.config.models.retired,
         )
         review_outcome = await review_workflow.run(
             run_id,
@@ -995,6 +1066,7 @@ class Application:
             routing_rules_cfg,
             self.ui,
             role_override=role_override,
+            retired_models=self.config.models.retired,
         )
         documentation_outcome = await documentation_workflow.run(
             run_id,
@@ -1297,6 +1369,7 @@ class Application:
                 models_cfg,
                 routing_rules_cfg,
                 self.ui,
+                retired_models=self.config.models.retired,
             )
             planning_outcome = await planning_workflow.resume(
                 run_id, persisted_task_description, ctx, current_state

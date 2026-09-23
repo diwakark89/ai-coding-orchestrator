@@ -59,9 +59,9 @@ def test_validate_model_allowed():
     # Permitted models must pass
     validate_model_allowed("Claude Sonnet 5")
     validate_model_allowed("sonnet")
-    validate_model_allowed("claude-opus-5")
-    validate_model_allowed("GPT-5.6 Luna")
-    validate_model_allowed("gpt-5.6-terra")
+    validate_model_allowed("claude-opus-5-5")
+    validate_model_allowed("GPT-6 Luna")
+    validate_model_allowed("gpt-6-sol")
     validate_model_allowed("Gemini 3.8 Flash")
 
 
@@ -105,7 +105,7 @@ def test_agent_request_working_directory_override(tmp_path: Path):
         prompt="Implement feature",
         repository_path=tmp_path,
         working_directory=worktree,
-        model="GPT-5.6 Terra",
+        model="GPT-6 Sol",
     )
     assert req.effective_working_directory == worktree
     assert req.worktree_path == worktree
@@ -129,7 +129,7 @@ def test_agent_result_properties():
 
     fail_res = AgentResult(
         provider=Provider.OPENAI,
-        model="gpt-5.6-terra",
+        model="gpt-6-sol",
         exit_code=1,
         started_at=start,
         completed_at=end,
@@ -211,14 +211,31 @@ def test_claude_adapter_build_args_resume(tmp_path: Path):
         role=AgentRole.DEFAULT_PLANNER,
         prompt="Next question",
         repository_path=tmp_path,
-        model="Claude Opus 5",
+        model="Claude Opus 5.5",
         read_only=False,
     )
     args = adapter.build_args(req, session_id="session-xyz-123")
     assert "--resume" in args
     idx = args.index("--resume")
     assert args[idx + 1] == "session-xyz-123"
-    assert args[args.index("--model") + 1] == "opus"
+    assert args[args.index("--model") + 1] == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["Claude Opus 5.5", "claude-opus-5-5", "Claude Opus", "Claude Opus 5", "claude-opus-5"],
+)
+def test_claude_adapter_pins_opus_to_5_5(tmp_path: Path, model: str):
+    """All Opus names, including legacy Opus 5 ones, pin to the exact Opus 5.5 model ID."""
+    adapter = ClaudeAdapter(command="claude")
+    req = AgentRequest(
+        role=AgentRole.ARCHITECTURE_PLANNER,
+        prompt="Plan",
+        repository_path=tmp_path,
+        model=model,
+    )
+    args = adapter.build_args(req)
+    assert args[args.index("--model") + 1] == "claude-opus-5-5"
 
 
 @pytest.mark.asyncio
@@ -320,7 +337,7 @@ def test_codex_adapter_build_args(tmp_path: Path):
         role=AgentRole.LIGHTWEIGHT_CODER,
         prompt="Fix import error",
         repository_path=tmp_path,
-        model="GPT-5.6 Luna",
+        model="GPT-6 Luna",
     )
     args = adapter.build_args(req)
     assert args == [
@@ -328,9 +345,32 @@ def test_codex_adapter_build_args(tmp_path: Path):
         "exec",
         "--json",
         "--model",
-        "gpt-5.6-luna",
+        "gpt-6-luna",
         "Fix import error",
     ]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("GPT-6 Luna", "gpt-6-luna"),
+        ("GPT-6 Sol", "gpt-6-sol"),
+        ("GPT-5.6 Luna", "gpt-6-luna"),
+        ("GPT-5.6 Terra", "gpt-6-sol"),
+        ("terra", "gpt-6-sol"),
+    ],
+)
+def test_codex_adapter_upgrades_legacy_gpt_names(tmp_path: Path, model: str, expected: str):
+    """Current and legacy GPT-5.6 names resolve to the GPT-6 model IDs."""
+    adapter = CodexAdapter(command="codex")
+    req = AgentRequest(
+        role=AgentRole.STANDARD_CODER,
+        prompt="Implement",
+        repository_path=tmp_path,
+        model=model,
+    )
+    args = adapter.build_args(req)
+    assert args[args.index("--model") + 1] == expected
 
 
 @pytest.mark.asyncio
@@ -341,7 +381,7 @@ async def test_codex_adapter_resume_unsupported(tmp_path: Path):
         role=AgentRole.STANDARD_CODER,
         prompt="Continue fixing",
         repository_path=tmp_path,
-        model="GPT-5.6 Terra",
+        model="GPT-6 Sol",
     )
     with pytest.raises(UnsupportedCapabilityError, match="does not support session resume"):
         await adapter.resume("some-session-id", req)
@@ -374,13 +414,13 @@ async def test_codex_adapter_start_jsonl_output(tmp_path: Path, monkeypatch):
         role=AgentRole.STANDARD_CODER,
         prompt="Implement auth controller",
         repository_path=tmp_path,
-        model="gpt-5.6-terra",
+        model="gpt-6-sol",
     )
     result = await adapter.start(req)
 
     assert result.success is True
     assert result.provider == Provider.OPENAI
-    assert result.model == "gpt-5.6-terra"
+    assert result.model == "gpt-6-sol"
     assert "Code generated successfully." in result.text
     assert len(result.raw_events) == 2
 
@@ -408,7 +448,7 @@ async def test_codex_adapter_cli_error_preservation(tmp_path: Path, monkeypatch)
         role=AgentRole.LIGHTWEIGHT_CODER,
         prompt="Run check",
         repository_path=tmp_path,
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
     )
     result = await adapter.start(req)
 
@@ -814,7 +854,7 @@ async def test_codex_adapter_plain_text_output(tmp_path: Path, monkeypatch):
         role=AgentRole.LIGHTWEIGHT_CODER,
         prompt="Check code",
         repository_path=tmp_path,
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
     )
     result = await adapter.start(req)
 

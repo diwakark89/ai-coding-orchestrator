@@ -107,6 +107,18 @@ class LoggingConfig(BaseModel):
         return _expand_path(v)
 
 
+class RetiredModelsConfig(BaseModel):
+    """User-managed model retirements: retired model name -> replacement model name.
+
+    Set via `agentflow retire`; consulted by routing resolution (routing/rules.py
+    `ModelsConfig.resolve()`) so a retirement applies to every project on this machine
+    without editing any project's routing.yaml. Keys are stored lower-cased and stripped.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    retired: dict[str, str] = Field(default_factory=dict)
+
+
 class GlobalConfig(BaseModel):
     """Global AgentFlow machine configuration (~/.agentflow/config.yaml)."""
 
@@ -116,6 +128,7 @@ class GlobalConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     worktrees: WorktreesConfig = Field(default_factory=WorktreesConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    models: RetiredModelsConfig = Field(default_factory=RetiredModelsConfig)
 
     @field_validator("version")
     @classmethod

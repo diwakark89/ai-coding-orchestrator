@@ -8,14 +8,14 @@ models:
       model: Claude Sonnet 5
     architecture:
       provider: anthropic
-      model: Claude Opus 5
+      model: Claude Opus 5.5
   implementation:
     lightweight:
       provider: openai
-      model: GPT-5.6 Luna
+      model: GPT-6 Luna
     standard:
       provider: openai
-      model: GPT-5.6 Terra
+      model: GPT-6 Sol
     escalation:
       provider: anthropic
       model: Claude Sonnet 5
@@ -28,7 +28,7 @@ models:
       model: Claude Sonnet 5
     architecture:
       provider: anthropic
-      model: Claude Opus 5
+      model: Claude Opus 5.5
   documentation:
     default:
       provider: google

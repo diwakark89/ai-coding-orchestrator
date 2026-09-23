@@ -218,7 +218,7 @@ def test_record_and_list_agent_sessions(tmp_path: Path):
         "sess_1", "run_sessions", "PLANNING", "anthropic", "Claude Sonnet 5", "cli-session-abc"
     )
     mgr.record_agent_session(
-        "sess_2", "run_sessions", "PLANNING", "anthropic", "Claude Opus 5", None
+        "sess_2", "run_sessions", "PLANNING", "anthropic", "Claude Opus 5.5", None
     )
 
     sessions = mgr.list_agent_sessions("run_sessions")
@@ -260,13 +260,13 @@ def test_record_and_list_routing_decisions(tmp_path: Path):
         "LOW",
         "implementation.force-standard",
         "openai",
-        "GPT-5.6 Terra",
+        "GPT-6 Sol",
         "Authorization requires the standard tier.",
     )
 
     decisions = mgr.list_routing_decisions("run_routing")
     assert len(decisions) == 1
-    assert decisions[0].model == "GPT-5.6 Terra"
+    assert decisions[0].model == "GPT-6 Sol"
     assert decisions[0].matched_rule == "implementation.force-standard"
 
 
@@ -355,7 +355,7 @@ def test_record_and_list_safe_observability_events(tmp_path: Path):
         stage="IMPLEMENTING",
         event="AGENT_COMPLETED",
         provider="openai",
-        model="GPT-5.6 Luna",
+        model="GPT-6 Luna",
         attributes={"exit_code": 0, "duration_seconds": 1.25, "timed_out": False},
     )
 

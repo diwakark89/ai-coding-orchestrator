@@ -12,6 +12,10 @@ No AI model ever decides which model executes the next stage — this module is 
 function of its inputs and must produce an identical RoutingDecision for identical inputs.
 """
 
+from collections.abc import Mapping
+
+from agentflow.agents.base import validate_model_allowed
+from agentflow.config.retirement import apply_retirements
 from agentflow.routing.complexity import (
     DEFAULT_COMPLEXITY_CONFIG,
     ComplexityConfig,
@@ -40,12 +44,17 @@ def route(
     routing_rules: RoutingRulesConfig | None = None,
     complexity_config: ComplexityConfig | None = None,
     user_override: ModelRef | None = None,
+    retired_models: Mapping[str, str] | None = None,
 ) -> RoutingDecision:
     """Deterministically select a provider/model for a TaskProfile's stage.
 
     Given the same TaskProfile and routing configuration, always returns an identical
     RoutingDecision (TDD §2, §24). The planner never influences this beyond the facts it
     reported in the TaskProfile itself.
+
+    `retired_models` is the global, user-managed retirement map (`GlobalConfig.models.retired`,
+    see config/retirement.py); when set, every model this function would otherwise return --
+    including an explicit `user_override` -- is transparently substituted through it.
     """
     models_cfg = models or DEFAULT_MODELS_CONFIG
     rules_cfg = routing_rules or DEFAULT_ROUTING_RULES
@@ -54,9 +63,15 @@ def route(
     )
 
     if user_override is not None:
+        ref = user_override
+        if retired_models:
+            substituted = apply_retirements(ref.model, retired_models)
+            if substituted != ref.model:
+                validate_model_allowed(substituted)
+                ref = ModelRef(provider=ref.provider, model=substituted)
         return _decision(
             task_profile,
-            user_override,
+            ref,
             role="user.override",
             matched_rule="user-override",
             reason="Explicit user override takes precedence over all routing rules.",
@@ -65,11 +80,15 @@ def route(
         )
 
     if task_profile.stage == Stage.PLANNING:
-        return _route_planning(task_profile, models_cfg, rules_cfg.planning, complexity_result)
+        return _route_planning(
+            task_profile, models_cfg, rules_cfg.planning, complexity_result, retired_models
+        )
     if task_profile.stage == Stage.REVIEW:
-        return _route_review(task_profile, models_cfg, rules_cfg.review, complexity_result)
+        return _route_review(
+            task_profile, models_cfg, rules_cfg.review, complexity_result, retired_models
+        )
     if task_profile.stage == Stage.DOCUMENTATION:
-        ref = models_cfg.resolve(rules_cfg.documentation.default)
+        ref = models_cfg.resolve(rules_cfg.documentation.default, retired=retired_models)
         return _decision(
             task_profile,
             ref,
@@ -82,7 +101,7 @@ def route(
 
     # Stage.IMPLEMENTATION (and any future stage defaults to implementation routing).
     return _route_implementation(
-        task_profile, models_cfg, rules_cfg.implementation, complexity_result
+        task_profile, models_cfg, rules_cfg.implementation, complexity_result, retired_models
     )
 
 
@@ -91,6 +110,7 @@ def _route_planning(
     models_cfg: ModelsConfig,
     planning_rules: PlanningRouting,
     complexity_result: ComplexityResult,
+    retired_models: Mapping[str, str] | None = None,
 ) -> RoutingDecision:
     """Apply planning-stage precedence: workflow-stage architecture escalation, then default."""
     triggered = [
@@ -99,7 +119,7 @@ def _route_planning(
         if getattr(task_profile, flag, False) is True
     ]
     if triggered:
-        ref = models_cfg.resolve(planning_rules.architecture)
+        ref = models_cfg.resolve(planning_rules.architecture, retired=retired_models)
         return _decision(
             task_profile,
             ref,
@@ -110,7 +130,7 @@ def _route_planning(
             risk_flags=triggered,
         )
 
-    ref = models_cfg.resolve(planning_rules.default)
+    ref = models_cfg.resolve(planning_rules.default, retired=retired_models)
     return _decision(
         task_profile,
         ref,
@@ -127,6 +147,7 @@ def _route_implementation(
     models_cfg: ModelsConfig,
     impl_rules: ImplementationRouting,
     complexity_result: ComplexityResult,
+    retired_models: Mapping[str, str] | None = None,
 ) -> RoutingDecision:
     """Apply implementation precedence: hard risk, then project rule, then built-in default."""
     triggered_risks = [
@@ -135,7 +156,7 @@ def _route_implementation(
         if getattr(task_profile, flag, False) is True
     ]
     if triggered_risks:
-        ref = models_cfg.resolve("implementation.standard")
+        ref = models_cfg.resolve("implementation.standard", retired=retired_models)
         return _decision(
             task_profile,
             ref,
@@ -151,7 +172,7 @@ def _route_implementation(
 
     matched = match_complexity_rule(impl_rules.rules, complexity_result.level)
     if matched is not None:
-        ref = models_cfg.resolve(matched.use)
+        ref = models_cfg.resolve(matched.use, retired=retired_models)
         return _decision(
             task_profile,
             ref,
@@ -169,7 +190,7 @@ def _route_implementation(
         ComplexityLevel.MEDIUM: "implementation.standard",
         ComplexityLevel.HIGH: "implementation.standard",
     }[complexity_result.level]
-    ref = models_cfg.resolve(fallback_alias)
+    ref = models_cfg.resolve(fallback_alias, retired=retired_models)
     return _decision(
         task_profile,
         ref,
@@ -189,6 +210,7 @@ def _route_review(
     models_cfg: ModelsConfig,
     review_rules: ReviewRouting,
     complexity_result: ComplexityResult,
+    retired_models: Mapping[str, str] | None = None,
 ) -> RoutingDecision:
     """Apply review-stage precedence: architecture escalation, then deep review, then default."""
     architecture_triggered = [
@@ -197,7 +219,7 @@ def _route_review(
         if getattr(task_profile, flag, False) is expected
     ]
     if architecture_triggered:
-        ref = models_cfg.resolve(review_rules.architecture)
+        ref = models_cfg.resolve(review_rules.architecture, retired=retired_models)
         return _decision(
             task_profile,
             ref,
@@ -212,7 +234,7 @@ def _route_review(
         flag for flag in review_rules.deep_if_any if getattr(task_profile, flag, False) is True
     ]
     if deep_triggered:
-        ref = models_cfg.resolve(review_rules.deep)
+        ref = models_cfg.resolve(review_rules.deep, retired=retired_models)
         return _decision(
             task_profile,
             ref,
@@ -223,7 +245,7 @@ def _route_review(
             risk_flags=deep_triggered,
         )
 
-    ref = models_cfg.resolve(review_rules.default)
+    ref = models_cfg.resolve(review_rules.default, retired=retired_models)
     return _decision(
         task_profile,
         ref,

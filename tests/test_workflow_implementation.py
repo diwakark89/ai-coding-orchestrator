@@ -85,7 +85,7 @@ def make_agent_result(
     now = datetime.now(timezone.utc)
     return AgentResult(
         provider=Provider.OPENAI,
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
         session_id="sess-codex-1",
         exit_code=exit_code,
         text=text,
@@ -96,7 +96,7 @@ def make_agent_result(
 
 
 def make_routing_decision(
-    role: str = "implementation.lightweight", model: str = "GPT-5.6 Luna"
+    role: str = "implementation.lightweight", model: str = "GPT-6 Luna"
 ) -> RoutingDecision:
     return RoutingDecision(
         stage=Stage.IMPLEMENTATION,
@@ -242,5 +242,5 @@ async def test_agent_session_is_recorded(git_repo: Path, tmp_path: Path):
 
     sessions = db.list_agent_sessions("run_1")
     assert len(sessions) == 1
-    assert sessions[0].model == "GPT-5.6 Luna"
+    assert sessions[0].model == "GPT-6 Luna"
     assert sessions[0].cli_session_id == "sess-codex-1"

@@ -1,8 +1,11 @@
 """Routing configuration schema: model alias bindings and per-stage rule definitions."""
 
+from collections.abc import Mapping
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentflow.agents.base import Provider, validate_model_allowed
+from agentflow.config.retirement import apply_retirements
 from agentflow.task.profile import Stage
 
 
@@ -94,30 +97,41 @@ class ModelsConfig(BaseModel):
     review: ReviewModels
     documentation: DocumentationModels
 
-    def resolve(self, alias: str) -> ModelRef:
-        """Resolve a dotted role alias such as 'implementation.lightweight' to a ModelRef."""
+    def resolve(self, alias: str, retired: Mapping[str, str] | None = None) -> ModelRef:
+        """Resolve a dotted role alias such as 'implementation.lightweight' to a ModelRef.
+
+        When `retired` (the global `models.retired` map, see config/retirement.py) is given,
+        the resolved model is substituted through it -- e.g. a project still configured for a
+        retired model transparently gets its replacement -- and the substituted model is
+        re-validated against the V1 model pool before being returned.
+        """
         category, sep, key = alias.partition(".")
         section = getattr(self, category, None) if sep else None
         ref = getattr(section, key, None) if section is not None else None
         if not isinstance(ref, ModelRef):
             raise ValueError(f"Undefined model alias: '{alias}'.")
+        if retired:
+            substituted = apply_retirements(ref.model, retired)
+            if substituted != ref.model:
+                validate_model_allowed(substituted)
+                return ModelRef(provider=ref.provider, model=substituted)
         return ref
 
 
 DEFAULT_MODELS_CONFIG = ModelsConfig(
     planner=PlannerModels(
         default=ModelRef(provider="anthropic", model="Claude Sonnet 5"),
-        architecture=ModelRef(provider="anthropic", model="Claude Opus 5"),
+        architecture=ModelRef(provider="anthropic", model="Claude Opus 5.5"),
     ),
     implementation=ImplementationModels(
-        lightweight=ModelRef(provider="openai", model="GPT-5.6 Luna"),
-        standard=ModelRef(provider="openai", model="GPT-5.6 Terra"),
+        lightweight=ModelRef(provider="openai", model="GPT-6 Luna"),
+        standard=ModelRef(provider="openai", model="GPT-6 Sol"),
         escalation=ModelRef(provider="anthropic", model="Claude Sonnet 5"),
     ),
     review=ReviewModels(
         default=ModelRef(provider="google", model="Gemini 3.8 Flash"),
         deep=ModelRef(provider="anthropic", model="Claude Sonnet 5"),
-        architecture=ModelRef(provider="anthropic", model="Claude Opus 5"),
+        architecture=ModelRef(provider="anthropic", model="Claude Opus 5.5"),
     ),
     documentation=DocumentationModels(
         default=ModelRef(provider="google", model="Gemini 3.8 Flash"),

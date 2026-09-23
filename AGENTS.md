@@ -11,7 +11,7 @@ This document is your primary operating manual when reading, designing, testing,
 AgentFlow coordinates locally installed coding-agent CLIs (Claude Code, OpenAI Codex CLI, Gemini CLI) across end-to-end software development workflows:
 - **Interactive Planning:** Multi-turn requirement gathering and architecture planning via Claude.
 - **Deterministic Routing:** Configuration-driven worker model selection without autonomous agent discretion over models.
-- **Isolated Implementation:** Autonomous code changes executed strictly inside isolated Git worktrees via Codex CLI (GPT-5.6 Luna / Terra).
+- **Isolated Implementation:** Autonomous code changes executed strictly inside isolated Git worktrees via Codex CLI (GPT-6 Luna / Sol).
 - **Deterministic Verification:** Project-defined builds, tests, and linters run by the orchestrator (actual process exit codes dictate success, never model claims).
 - **Independent Review:** Read-only inspection of final diffs via Gemini 3.8 Flash (escalating to Claude Sonnet/Opus for security/architecture).
 - **Documentation & Completion:** Post-verification documentation sync and human approval.
@@ -41,7 +41,7 @@ Every agent working on this codebase must adhere to the following rules without 
    - Routing is calculated deterministically from the Pydantic `TaskProfile` and `.ai-orchestrator/routing.yaml` using exact precedence rules (see [technical-design-document.md](technical-design-document.md) §18).
 
 4. **Strict V1 Model Pool:**
-   - Permitted models: `Claude Sonnet 5`, `Claude Opus 5`, `GPT-5.6 Luna`, `GPT-5.6 Terra`, `Gemini 3.8 Flash`.
+   - Permitted models: `Claude Sonnet 5`, `Claude Opus 5.5`, `GPT-6 Luna`, `GPT-6 Sol`, `Gemini 3.8 Flash`.
    - **Explicitly Excluded:** `GPT-5.4 Mini` and `GPT-5.6 Sol` must never appear in routing tables, defaults, fallbacks, or escalation chains.
 
 5. **Single-Writer Constraint:**
@@ -154,13 +154,13 @@ AgentFlow orchestrates three CLI toolsets. Full specs for every role and schema 
 | Role | Assigned Model | Provider CLI | Purpose & Trigger |
 | :--- | :--- | :--- | :--- |
 | **Default Planner** | `Claude Sonnet 5` | `claude` | Interactive repository analysis, question loop, plan creation |
-| **Architecture Planner** | `Claude Opus 5` | `claude` | Escalated planning for architecture changes, new services, datastores, payments |
-| **Lightweight Coder** | `GPT-5.6 Luna` | `codex` | Low complexity (score 0–2), no hard risks |
-| **Standard / High Coder**| `GPT-5.6 Terra` | `codex` | Medium/high complexity or any hard risk flag |
+| **Architecture Planner** | `Claude Opus 5.5` | `claude` | Escalated planning for architecture changes, new services, datastores, payments |
+| **Lightweight Coder** | `GPT-6 Luna` | `codex` | Low complexity (score 0–2), no hard risks |
+| **Standard / High Coder**| `GPT-6 Sol` | `codex` | Medium/high complexity or any hard risk flag |
 | **Implementation Escalation** | `Claude Sonnet 5` | `claude` | Repeated implementation or complex repair failures |
 | **Default Reviewer** | `Gemini 3.8 Flash`| `gemini` | Fast, independent read-only diff inspection post-verification |
 | **Deep Reviewer** | `Claude Sonnet 5` | `claude` | Deep inspection when security, auth, concurrency, or payments are modified |
-| **Architecture Reviewer**| `Claude Opus 5` | `claude` | Structural review when `architecture_change = true` |
+| **Architecture Reviewer**| `Claude Opus 5.5` | `claude` | Structural review when `architecture_change = true` |
 | **Documenter** | `Gemini 3.8 Flash`| `gemini` | Sync project docs (`architecture.md`, etc.) based on final diff |
 
 ### 2. Core Schemas & Contracts
@@ -169,10 +169,10 @@ Canonical schemas (`TaskProfile`, Routing Decision Contract, `AgentRequest`/`Age
 ### 3. Deterministic Precedence Hierarchy
 When evaluating routing for any workflow stage:
 1. **Explicit User Override** (CLI flag or manual input)
-2. **Hard Risk Rules** (e.g. `force_standard_if_any` triggers Terra)
+2. **Hard Risk Rules** (e.g. `force_standard_if_any` triggers Sol)
 3. **Workflow Stage Rules** (Planning, Review, Documentation specific rules)
 4. **Project-Specific Rules** (Configured top-to-bottom in `routing.yaml`, first match wins)
-5. **Complexity Rules** (Low -> Luna, Medium/High -> Terra)
+5. **Complexity Rules** (Low -> Luna, Medium/High -> Sol)
 6. **Default Fallback**
 
 ---

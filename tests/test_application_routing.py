@@ -92,17 +92,69 @@ async def test_run_routing_persists_decision_json_and_db_record(
 
     assert outcome.planning_outcome.state == WorkflowState.TASK_CLASSIFIED
     assert outcome.decision is not None
-    assert outcome.decision.model == "GPT-5.6 Terra"
+    assert outcome.decision.model == "GPT-6 Sol"
     assert outcome.decision.matched_rule == "implementation.force-standard"
     assert outcome.decision_path is not None
     assert outcome.decision_path.exists()
 
     persisted = json.loads(outcome.decision_path.read_text(encoding="utf-8"))
-    assert persisted["model"] == "GPT-5.6 Terra"
+    assert persisted["model"] == "GPT-6 Sol"
 
     records = app_instance.db_manager.list_routing_decisions(outcome.planning_outcome.run_id)
     assert len(records) == 1
-    assert records[0].model == "GPT-5.6 Terra"
+    assert records[0].model == "GPT-6 Sol"
+
+
+@pytest.mark.asyncio
+async def test_run_routing_applies_global_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A model retired via GlobalConfig.models.retired is substituted in the persisted decision,
+    even though the project's routing config was never touched."""
+    monkeypatch.setattr(
+        planning_module, "ask_plan_approval", lambda console_instance=None: ApprovalDecision.APPROVE
+    )
+    (tmp_path / ".git").mkdir()
+
+    payload = json.dumps(
+        {
+            "status": "plan_ready",
+            "plan_markdown": "# Plan\n\nObjective: add a secured endpoint.\n",
+            "task_profile": {
+                "stage": "IMPLEMENTATION",
+                "technologies": ["python"],
+                "affected_layers": ["backend"],
+                "estimated_files": 2,
+                "authorization": True,
+            },
+        }
+    )
+    adapter = ScriptedAdapter([make_result(payload)])
+    registry = AgentAdapterRegistry()
+    registry.register(Provider.ANTHROPIC, adapter)
+
+    config = GlobalConfig()
+    config.models.retired = {"gpt-6 sol": "GPT-6 Luna"}
+    app_instance = Application(
+        config=config,
+        db_manager=DatabaseManager(":memory:"),
+        agent_registry=registry,
+    )
+
+    outcome = await app_instance.run_routing("Add a secured endpoint", project_path=tmp_path)
+
+    # Without the retirement this hard-risk flag would route to GPT-6 Sol (see the equivalent
+    # assertion above); the global retirement transparently substitutes GPT-6 Luna instead.
+    assert outcome.decision is not None
+    assert outcome.decision.model == "GPT-6 Luna"
+    assert outcome.decision.matched_rule == "implementation.force-standard"
+    assert outcome.decision_path is not None
+
+    persisted = json.loads(outcome.decision_path.read_text(encoding="utf-8"))
+    assert persisted["model"] == "GPT-6 Luna"
+
+    records = app_instance.db_manager.list_routing_decisions(outcome.planning_outcome.run_id)
+    assert records[0].model == "GPT-6 Luna"
 
 
 @pytest.mark.asyncio

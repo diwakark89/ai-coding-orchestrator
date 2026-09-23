@@ -693,5 +693,55 @@ def stats_cmd(
     app_instance.render_statistics(report)
 
 
+@app.command(name="retire")
+def retire_cmd(
+    old_model: Annotated[
+        str | None,
+        typer.Argument(help="Model name to retire, e.g. 'GPT-5.6 Terra'."),
+    ] = None,
+    new_model: Annotated[
+        str | None,
+        typer.Argument(help="Replacement model name, e.g. 'GPT-6 Sol'."),
+    ] = None,
+    list_: Annotated[
+        bool,
+        typer.Option("--list", help="List current model retirements."),
+    ] = False,
+    remove: Annotated[
+        str | None,
+        typer.Option("--remove", help="Un-retire this model name."),
+    ] = None,
+) -> None:
+    """Retire a model globally: every project transparently uses the replacement from now on,
+    with no need to edit any project's routing.yaml."""
+    app_instance = Application()
+
+    if list_:
+        app_instance.render_retirements(app_instance.list_retirements())
+        return
+
+    if remove is not None:
+        removed = app_instance.remove_retirement(remove)
+        if removed:
+            app_instance.ui.print_success(f"'{remove}' is no longer retired.")
+        else:
+            app_instance.ui.print_warning(f"'{remove}' was not retired; nothing to remove.")
+        return
+
+    if old_model is None or new_model is None:
+        app_instance.ui.print_error(
+            "Provide both OLD_MODEL and NEW_MODEL, or use --list / --remove."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        report = app_instance.run_retire(old_model, new_model)
+    except AgentFlowError as e:
+        app_instance.ui.print_error(str(e))
+        raise typer.Exit(code=1) from e
+    app_instance.ui.print_success(f"'{old_model}' retired; replaced by '{new_model}'.")
+    app_instance.render_retirements(report)
+
+
 if __name__ == "__main__":
     app()

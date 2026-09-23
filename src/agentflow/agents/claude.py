@@ -17,10 +17,13 @@ from agentflow.process.executor import ProcessExecutor, ProcessResult
 CLAUDE_MODEL_ALIASES: dict[str, str] = {
     "claude sonnet 5": "sonnet",
     "claude sonnet": "sonnet",
-    "claude opus 5": "opus",
-    "claude opus": "opus",
+    "claude opus 5.5": "claude-opus-5-5",
+    "claude opus": "claude-opus-5-5",
     "claude-sonnet-5": "sonnet",
-    "claude-opus-5": "opus",
+    "claude-opus-5-5": "claude-opus-5-5",
+    # Legacy Opus 5 names are upgraded to Opus 5.5 so older routing.yaml files keep working.
+    "claude opus 5": "claude-opus-5-5",
+    "claude-opus-5": "claude-opus-5-5",
 }
 
 UUID_PATTERN = re.compile(

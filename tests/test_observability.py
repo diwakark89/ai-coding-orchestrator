@@ -55,7 +55,7 @@ def test_statistics_are_reproducible_from_persisted_records(tmp_path: Path):
     _seed_run(
         db_manager,
         "RUN-LUNA",
-        "GPT-5.6 Luna",
+        "GPT-6 Luna",
         "complexity.low",
         first_pass_success=True,
         severity="HIGH",
@@ -63,7 +63,7 @@ def test_statistics_are_reproducible_from_persisted_records(tmp_path: Path):
     _seed_run(
         db_manager,
         "RUN-TERRA",
-        "GPT-5.6 Terra",
+        "GPT-6 Sol",
         "hard-risk.force-standard",
         first_pass_success=False,
     )
@@ -73,11 +73,11 @@ def test_statistics_are_reproducible_from_persisted_records(tmp_path: Path):
 
     assert report.total_runs == 2
     by_model = {metric.model: metric for metric in report.models}
-    assert by_model["GPT-5.6 Luna"].tasks == 1
-    assert by_model["GPT-5.6 Luna"].routing_selections == 1
-    assert by_model["GPT-5.6 Luna"].first_pass_rate == 1.0
-    assert by_model["GPT-5.6 Terra"].first_pass_rate == 0.0
-    assert by_model["GPT-5.6 Terra"].escalations == 1
+    assert by_model["GPT-6 Luna"].tasks == 1
+    assert by_model["GPT-6 Luna"].routing_selections == 1
+    assert by_model["GPT-6 Luna"].first_pass_rate == 1.0
+    assert by_model["GPT-6 Sol"].first_pass_rate == 0.0
+    assert by_model["GPT-6 Sol"].escalations == 1
     assert by_model["Gemini 3.8 Flash"].review_findings == 1
     assert report.routing_rule_frequency == {
         "complexity.low": 1,

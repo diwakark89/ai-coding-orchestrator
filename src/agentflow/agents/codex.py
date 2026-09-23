@@ -14,10 +14,16 @@ from agentflow.errors import UnsupportedCapabilityError
 from agentflow.process.executor import ProcessExecutor, ProcessResult
 
 CODEX_MODEL_ALIASES: dict[str, str] = {
-    "gpt-5.6 luna": "gpt-5.6-luna",
-    "gpt-5.6 terra": "gpt-5.6-terra",
-    "luna": "gpt-5.6-luna",
-    "terra": "gpt-5.6-terra",
+    "gpt-6 luna": "gpt-6-luna",
+    "gpt-6 sol": "gpt-6-sol",
+    "luna": "gpt-6-luna",
+    "sol": "gpt-6-sol",
+    # Legacy GPT-5.6 names are upgraded to GPT-6 so older routing.yaml files keep working.
+    "gpt-5.6 luna": "gpt-6-luna",
+    "gpt-5.6 terra": "gpt-6-sol",
+    "gpt-5.6-luna": "gpt-6-luna",
+    "gpt-5.6-terra": "gpt-6-sol",
+    "terra": "gpt-6-sol",
 }
 
 

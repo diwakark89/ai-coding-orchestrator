@@ -9,7 +9,7 @@ and a machine-readable `task-profile.json` (validated against `TaskProfile`).
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -214,11 +214,13 @@ class PlanningWorkflow:
         feedback_prompt: Callable[[], str] | None = None,
         max_malformed_retries: int = 2,
         max_turns: int = 12,
+        retired_models: Mapping[str, str] | None = None,
     ) -> None:
         self.db_manager = db_manager
         self.agent_registry = agent_registry
         self.models_config = models_config
         self.routing_rules = routing_rules
+        self.retired_models = retired_models
         self.ui = console_ui or ConsoleUI()
         self.question_prompt: Callable[[PlannerQuestion], str] = (
             question_prompt or self._default_question_prompt
@@ -233,12 +235,16 @@ class PlanningWorkflow:
     @property
     def _default_model_ref(self) -> ModelRef:
         """The configured planner model/provider for a fresh (non-escalated) turn."""
-        return self.models_config.resolve(self.routing_rules.planning.default)
+        return self.models_config.resolve(
+            self.routing_rules.planning.default, retired=self.retired_models
+        )
 
     @property
     def _architecture_model_ref(self) -> ModelRef:
         """The configured planner model/provider to escalate to for architecture-sensitive work."""
-        return self.models_config.resolve(self.routing_rules.planning.architecture)
+        return self.models_config.resolve(
+            self.routing_rules.planning.architecture, retired=self.retired_models
+        )
 
     def _default_question_prompt(self, question: PlannerQuestion) -> str:
         """Default terminal prompt for a planner question."""

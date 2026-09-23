@@ -220,7 +220,7 @@ async def test_question_loop_records_decision_and_resumes_session(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_opus_escalation_switches_model_for_next_turn(tmp_path: Path):
-    """An escalation signal switches subsequent planner turns to Claude Opus 5."""
+    """An escalation signal switches subsequent planner turns to Claude Opus 5.5."""
     escalation_payload = json.dumps(
         {
             "status": "questions",
@@ -243,7 +243,7 @@ async def test_opus_escalation_switches_model_for_next_turn(tmp_path: Path):
 
     assert outcome.state == WorkflowState.TASK_CLASSIFIED
     second_request = adapter.calls[1][1]
-    assert second_request.model == "Claude Opus 5"
+    assert second_request.model == "Claude Opus 5.5"
 
     decisions = db.list_decisions(outcome.run_id)
     reasons = [d.answer for d in decisions if d.question == "architecture_escalation"]
@@ -251,7 +251,7 @@ async def test_opus_escalation_switches_model_for_next_turn(tmp_path: Path):
     assert "new_service" in reasons[0] or "architecture_change" in reasons[0]
 
     sessions = db.list_agent_sessions(outcome.run_id)
-    assert sessions[-1].model == "Claude Opus 5"
+    assert sessions[-1].model == "Claude Opus 5.5"
 
 
 @pytest.mark.asyncio
@@ -382,8 +382,8 @@ async def test_planning_routes_to_configured_non_anthropic_provider(tmp_path: Pa
     openai_models = DEFAULT_MODELS_CONFIG.model_copy(
         update={
             "planner": PlannerModels(
-                default=ModelRef(provider="openai", model="GPT-5.6 Terra"),
-                architecture=ModelRef(provider="openai", model="GPT-5.6 Terra"),
+                default=ModelRef(provider="openai", model="GPT-6 Sol"),
+                architecture=ModelRef(provider="openai", model="GPT-6 Sol"),
             )
         }
     )
@@ -395,7 +395,7 @@ async def test_planning_routes_to_configured_non_anthropic_provider(tmp_path: Pa
     assert outcome.state == WorkflowState.TASK_CLASSIFIED
     sessions = db.list_agent_sessions(outcome.run_id)
     assert sessions[0].provider == "openai"
-    assert sessions[0].model == "GPT-5.6 Terra"
+    assert sessions[0].model == "GPT-6 Sol"
 
 
 @pytest.mark.asyncio
@@ -405,8 +405,8 @@ async def test_cross_provider_escalation_switches_adapter_and_drops_session(tmp_
     mixed_models = DEFAULT_MODELS_CONFIG.model_copy(
         update={
             "planner": PlannerModels(
-                default=ModelRef(provider="openai", model="GPT-5.6 Terra"),
-                architecture=ModelRef(provider="anthropic", model="Claude Opus 5"),
+                default=ModelRef(provider="openai", model="GPT-6 Sol"),
+                architecture=ModelRef(provider="anthropic", model="Claude Opus 5.5"),
             )
         }
     )
@@ -442,4 +442,4 @@ async def test_cross_provider_escalation_switches_adapter_and_drops_session(tmp_
     assert session_id is None
     sessions = db.list_agent_sessions(outcome.run_id)
     assert sessions[-1].provider == "anthropic"
-    assert sessions[-1].model == "Claude Opus 5"
+    assert sessions[-1].model == "Claude Opus 5.5"

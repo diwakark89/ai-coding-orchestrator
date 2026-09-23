@@ -2,11 +2,12 @@
 
 Verification failures are classified with fixed keyword/command patterns (never AI
 classification), routed to the cheapest capable repair tier, and escalated
-(Luna -> Terra -> Sonnet) only after each tier repeatedly fails. Success is only ever
+(Luna -> Sol -> Sonnet) only after each tier repeatedly fails. Success is only ever
 declared after a full re-run of the configured verification sequence.
 """
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -150,7 +151,7 @@ def _build_repair_prompt(
 
 
 class RepairWorkflow:
-    """Bounded verify/repair/re-verify loop, escalating Luna -> Terra -> Sonnet."""
+    """Bounded verify/repair/re-verify loop, escalating Luna -> Sol -> Sonnet."""
 
     def __init__(
         self,
@@ -160,6 +161,7 @@ class RepairWorkflow:
         models_config: ModelsConfig,
         limits: LimitsConfig | None = None,
         console_ui: ConsoleUI | None = None,
+        retired_models: Mapping[str, str] | None = None,
     ) -> None:
         self.db_manager = db_manager
         self.agent_registry = agent_registry
@@ -167,6 +169,7 @@ class RepairWorkflow:
         self.models_config = models_config
         self.limits = limits or LimitsConfig()
         self.ui = console_ui or ConsoleUI()
+        self.retired_models = retired_models
 
     async def run(
         self,
@@ -274,7 +277,7 @@ class RepairWorkflow:
         tier: RepairTier,
     ) -> None:
         """Invoke the tier's adapter with a lock held, and record the resulting agent session."""
-        ref = self.models_config.resolve(_TIER_ALIASES[tier])
+        ref = self.models_config.resolve(_TIER_ALIASES[tier], retired=self.retired_models)
         lock = WorktreeLock(worktree_path)
         lock.acquire()
         try:

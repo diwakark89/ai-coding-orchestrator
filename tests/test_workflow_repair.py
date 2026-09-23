@@ -95,7 +95,7 @@ def make_agent_result(session_id: str = "sess-1") -> AgentResult:
     now = datetime.now(timezone.utc)
     return AgentResult(
         provider=Provider.OPENAI,
-        model="gpt-5.6-luna",
+        model="gpt-6-luna",
         session_id=session_id,
         exit_code=0,
         text="fixed it",
@@ -175,7 +175,7 @@ async def test_repair_succeeds_on_first_lightweight_attempt(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_lightweight_fails_twice_then_escalates_to_standard(tmp_path: Path):
-    """Two lightweight (Luna) failures escalate the third attempt to the standard (Terra) tier."""
+    """Two lightweight (Luna) failures escalate the third attempt to the standard (Sol) tier."""
     db, worktree_path, ctx, task_profile = make_environment(tmp_path)
     registry = AgentAdapterRegistry()
     registry.register(
@@ -287,5 +287,5 @@ async def test_agent_sessions_are_recorded_for_each_repair_attempt(tmp_path: Pat
 
     sessions = db.list_agent_sessions("run_1")
     assert len(sessions) == 1
-    assert sessions[0].model == "GPT-5.6 Luna"
+    assert sessions[0].model == "GPT-6 Luna"
     assert sessions[0].stage == "REPAIRING"

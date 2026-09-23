@@ -5,6 +5,7 @@ from agentflow.config.loader import (
     get_default_global_config_path,
     load_global_config,
     load_project_config,
+    save_global_config,
 )
 from agentflow.config.models import (
     CLICommandConfig,
@@ -13,9 +14,11 @@ from agentflow.config.models import (
     LoggingConfig,
     ProjectConfig,
     ProjectMetaConfig,
+    RetiredModelsConfig,
     StorageConfig,
     WorktreesConfig,
 )
+from agentflow.config.retirement import apply_retirements
 
 __all__ = [
     "CLICommandConfig",
@@ -25,9 +28,12 @@ __all__ = [
     "LoggingConfig",
     "ProjectConfig",
     "ProjectMetaConfig",
+    "RetiredModelsConfig",
     "StorageConfig",
     "WorktreesConfig",
+    "apply_retirements",
     "get_default_global_config_path",
     "load_global_config",
     "load_project_config",
+    "save_global_config",
 ]

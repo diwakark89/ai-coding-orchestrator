@@ -19,7 +19,7 @@ def make_routing_decision_record() -> RoutingDecisionRecord:
         complexity_level="LOW",
         matched_rule="low-complexity",
         provider="openai",
-        model="GPT-5.6 Luna",
+        model="GPT-6 Luna",
         reason="No risk flags.",
         created_at=datetime.now(timezone.utc),
     )
@@ -55,7 +55,7 @@ def test_final_summary_renders_all_required_sections():
 
     assert "Add a health check endpoint" in markdown
     assert "Objective: ..." in markdown
-    assert "GPT-5.6 Luna" in markdown
+    assert "GPT-6 Luna" in markdown
     assert "src/app.py" in markdown
     assert "PASSED" in markdown
     assert "Minor style nit." in markdown

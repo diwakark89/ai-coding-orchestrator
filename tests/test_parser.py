@@ -139,10 +139,10 @@ def test_parse_structured_json_fenced():
 
 def test_parse_structured_json_embedded_in_prose():
     text = """I have analyzed your request. Here is the decision payload:
-{"decision": "PROCEED", "model": "GPT-5.6 Terra"}
+{"decision": "PROCEED", "model": "GPT-6 Sol"}
 Please confirm if this works."""
     data = parse_structured_json(text)
-    assert data == {"decision": "PROCEED", "model": "GPT-5.6 Terra"}
+    assert data == {"decision": "PROCEED", "model": "GPT-6 Sol"}
 
 
 def test_parse_structured_json_empty_raises_error():
