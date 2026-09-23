@@ -1,6 +1,7 @@
 """Tests for deterministic verification execution (Phase 6)."""
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -8,12 +9,57 @@ import pytest
 from agentflow.config.models import VerificationGroup
 from agentflow.persistence.database import DatabaseManager
 from agentflow.workflow.verification import (
+    CommandResult,
+    VerificationResult,
     VerificationRunner,
     VerificationStatus,
+    describe_verification_failure,
     detect_applicable_groups,
 )
 
 PY = sys.executable
+
+
+def test_verification_failure_summary_explains_pytest_collection_without_raw_output():
+    """Blocked runs identify the command and safe failure cause without a traceback dump."""
+    now = datetime.now(timezone.utc)
+    failing = CommandResult(
+        command="pytest",
+        exit_code=2,
+        stdout=(
+            "private fixture value\n"
+            "ERROR ai-engine/tests - ModuleNotFoundError: No module named 'ai'\n"
+            "Interrupted: 14 errors during collection"
+        ),
+        stderr="",
+        started_at=now,
+        completed_at=now,
+    )
+    result = VerificationResult(status=VerificationStatus.FAILED, command_results=[failing])
+
+    summary = describe_verification_failure(result)
+
+    assert "pytest" in summary
+    assert "exit code 2" in summary
+    assert "14 errors during pytest collection" in summary
+    assert "missing module 'ai'" in summary
+    assert "private fixture value" not in summary
+
+
+def test_verification_failure_summary_explains_missing_npm_script():
+    """A missing configured script is reported as such, not as an architecture problem."""
+    now = datetime.now(timezone.utc)
+    failing = CommandResult(
+        command="npm test",
+        exit_code=1,
+        stdout="",
+        stderr='npm error Missing script: "test"',
+        started_at=now,
+        completed_at=now,
+    )
+    result = VerificationResult(status=VerificationStatus.FAILED, command_results=[failing])
+
+    assert "missing npm script 'test'" in describe_verification_failure(result)
 
 
 def _passing_command() -> str:

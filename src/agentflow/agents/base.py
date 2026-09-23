@@ -1,5 +1,6 @@
 """Provider-independent AI agent adapter abstractions and contracts."""
 
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
@@ -180,6 +181,23 @@ _PROVIDER_LOGIN_HINTS: dict[Provider, str] = {
     Provider.GOOGLE: "run `gemini` in an interactive terminal and complete its login flow",
 }
 
+_MODEL_REJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:unknown|unrecognized|invalid|unsupported) model\b", re.IGNORECASE),
+    re.compile(
+        r"\bmodel\b.{0,100}\b(?:not found|not available|unavailable|not supported|"
+        r"does not exist)\b",
+        re.IGNORECASE,
+    ),
+)
+
+_PROVIDER_UPDATE_HINTS: dict[Provider, str] = {
+    Provider.ANTHROPIC: "update the `claude` CLI using its installer or package manager",
+    Provider.OPENAI: "run `codex update`",
+    Provider.GOOGLE: (
+        "update the configured Google agent CLI using its installer or package manager"
+    ),
+}
+
 
 def is_authentication_failure(result: "AgentResult") -> bool:
     """Detect known provider-CLI 'not logged in' signatures in captured stderr/stdout."""
@@ -187,13 +205,46 @@ def is_authentication_failure(result: "AgentResult") -> bool:
     return any(marker in haystack for marker in _AUTH_FAILURE_MARKERS)
 
 
+def is_model_unavailable_failure(result: "AgentResult") -> bool:
+    """Detect a CLI or service rejection of the configured model on a failed invocation.
+
+    Missing local model metadata is only a warning: an older CLI can still complete a
+    request, and a separate failure must not be misreported as a model rejection.
+    """
+    if result.success or result.timed_out:
+        return False
+    for line in f"{result.stderr}\n{result.text}".splitlines():
+        lowered = line.lower()
+        if "model metadata" in lowered or "fallback model metadata" in lowered:
+            continue
+        if any(pattern.search(line) for pattern in _MODEL_REJECTION_PATTERNS):
+            return True
+    return False
+
+
 def describe_agent_failure(result: "AgentResult", agent_label: str) -> str:
     """Build a clear, actionable message for a non-zero-exit AgentResult.
 
-    Surfaces a detected authentication failure with explicit remediation instead of
-    burying it in a generic 'exited with code N: <stderr>' wrapper.
+    Surfaces detected model and authentication failures with explicit remediation
+    instead of burying them in a generic 'exited with code N: <stderr>' wrapper.
     """
     detail = result.stderr.strip() or result.text.strip() or "no output"
+    if is_model_unavailable_failure(result):
+        cli_name = _PROVIDER_CLI_NAMES.get(result.provider, result.provider.value)
+        cli_label = (
+            "configured Google agent CLI"
+            if result.provider == Provider.GOOGLE
+            else f"'{cli_name}' CLI"
+        )
+        update_hint = _PROVIDER_UPDATE_HINTS.get(
+            result.provider, f"update the `{cli_name}` CLI using its installation method"
+        )
+        return (
+            f"{agent_label} could not use configured model '{result.model}' with the "
+            f"{cli_label} (exit code {result.exit_code}). Check the model name, "
+            f"{update_hint}, and retry. If the updated CLI still rejects the model, "
+            "check account or workspace model access."
+        )
     if is_authentication_failure(result):
         cli_name = _PROVIDER_CLI_NAMES.get(result.provider, result.provider.value)
         hint = _PROVIDER_LOGIN_HINTS.get(

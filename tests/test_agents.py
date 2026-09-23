@@ -19,6 +19,7 @@ from agentflow.agents import (
     create_default_registry,
     validate_model_allowed,
 )
+from agentflow.agents.base import describe_agent_failure, is_model_unavailable_failure
 from agentflow.application import Application
 from agentflow.config.models import GlobalConfig
 from agentflow.errors import (
@@ -146,6 +147,66 @@ def test_agent_result_properties():
         timed_out=True,
     )
     assert timeout_res.success is False
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "stderr", "update_hint"),
+    [
+        (
+            Provider.OPENAI,
+            "GPT-6 Sol",
+            "ERROR: The 'gpt-6-sol' model is not supported when using Codex "
+            "with a ChatGPT account.",
+            "codex update",
+        ),
+        (Provider.ANTHROPIC, "Claude Sonnet 5", "Error: Unknown model: claude-sonnet-5", "claude"),
+        (
+            Provider.GOOGLE,
+            "Gemini 3.8 Flash",
+            "Error: Model gemini-3.8-flash not found",
+            "Google agent CLI",
+        ),
+    ],
+)
+def test_model_rejection_suggests_updating_affected_cli(
+    provider: Provider, model: str, stderr: str, update_hint: str
+):
+    """A rejected configured model yields a provider-specific update suggestion."""
+    now = datetime.now(timezone.utc)
+    result = AgentResult(
+        provider=provider,
+        model=model,
+        exit_code=1,
+        stderr=stderr,
+        started_at=now,
+        completed_at=now,
+    )
+
+    assert is_model_unavailable_failure(result)
+    message = describe_agent_failure(result, "Implementation agent")
+    assert model in message
+    assert update_hint in message
+    assert "account or workspace model access" in message
+
+
+def test_model_metadata_warning_does_not_hide_unrelated_failure():
+    """An outdated local catalog warning is not proof that the model caused the exit."""
+    now = datetime.now(timezone.utc)
+    result = AgentResult(
+        provider=Provider.OPENAI,
+        model="GPT-6 Sol",
+        exit_code=1,
+        stderr=(
+            "warning: Model metadata for `gpt-6-sol` not found. "
+            "Defaulting to fallback metadata.\n"
+            "ERROR: MCP connection failed"
+        ),
+        started_at=now,
+        completed_at=now,
+    )
+
+    assert not is_model_unavailable_failure(result)
+    assert "codex update" not in describe_agent_failure(result, "Implementation agent")
 
 
 # ---------------------------------------------------------------------------

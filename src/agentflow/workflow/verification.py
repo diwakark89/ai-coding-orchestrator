@@ -6,6 +6,7 @@ routing.yaml configuration, split into argv arrays and executed without a shell.
 """
 
 import os
+import re
 import shlex
 import uuid
 from datetime import datetime, timezone
@@ -71,6 +72,42 @@ class VerificationResult(BaseModel):
             if not result.success:
                 return result
         return None
+
+
+def describe_verification_failure(result: VerificationResult) -> str:
+    """Summarize a failed command without copying arbitrary test output into run state."""
+    failing = result.first_failure
+    if failing is None:
+        return f"Verification ended in state {result.status.value} without a failing command."
+
+    description = f"Verification command '{failing.command}' failed (exit code {failing.exit_code})"
+    if failing.timed_out:
+        return f"{description}: timed out."
+
+    output = f"{failing.stdout}\n{failing.stderr}"
+    details: list[str] = []
+    collection = re.search(r"\b(\d+) errors? during collection\b", output, re.IGNORECASE)
+    if collection:
+        details.append(f"{collection.group(1)} errors during pytest collection")
+
+    missing_module = re.search(r"No module named ['\"]([A-Za-z_][A-Za-z0-9_.-]*)['\"]", output)
+    if missing_module:
+        details.append(f"ModuleNotFoundError: missing module '{missing_module.group(1)}'")
+    else:
+        missing_script = re.search(r"Missing script: ['\"]([A-Za-z0-9:_-]+)['\"]", output)
+        if missing_script:
+            details.append(f"missing npm script '{missing_script.group(1)}'")
+
+    if not details:
+        exception = re.search(
+            r"\b(ModuleNotFoundError|ImportError|SyntaxError|TypeError|AssertionError|"
+            r"FileNotFoundError|ConnectionError|TimeoutError)\b",
+            output,
+        )
+        if exception:
+            details.append(exception.group(1))
+
+    return f"{description}: {'; '.join(details)}." if details else f"{description}."
 
 
 @runtime_checkable

@@ -80,12 +80,15 @@ class NoOpAdapter:
 
 
 def make_agent_result(
-    exit_code: int = 0, stderr: str = "", text: str = "Implemented."
+    exit_code: int = 0,
+    stderr: str = "",
+    text: str = "Implemented.",
+    model: str = "gpt-6-luna",
 ) -> AgentResult:
     now = datetime.now(timezone.utc)
     return AgentResult(
         provider=Provider.OPENAI,
-        model="gpt-6-luna",
+        model=model,
         session_id="sess-codex-1",
         exit_code=exit_code,
         text=text,
@@ -210,6 +213,40 @@ async def test_agent_failure_is_blocked(git_repo: Path, tmp_path: Path):
     assert outcome.state == WorkflowState.BLOCKED
     assert outcome.blocker_reason is not None
     assert "boom" in outcome.blocker_reason
+
+
+@pytest.mark.asyncio
+async def test_unavailable_model_blocks_with_cli_update_hint(git_repo: Path, tmp_path: Path):
+    """Implementation reports the configured model and CLI update action to the user."""
+    db, ctx, task_profile, worktree_manager = make_environment(git_repo, tmp_path)
+    registry = AgentAdapterRegistry()
+    registry.register(
+        Provider.OPENAI,
+        NoOpAdapter(
+            Provider.OPENAI,
+            make_agent_result(
+                exit_code=1,
+                model="GPT-6 Sol",
+                stderr="ERROR: The 'gpt-6-sol' model is not supported when using Codex "
+                "with a ChatGPT account.",
+            ),
+        ),
+    )
+
+    workflow = ImplementationWorkflow(db, registry, worktree_manager)
+    outcome = await workflow.run(
+        "run_1",
+        "Add a feature",
+        ctx,
+        "# Plan",
+        task_profile,
+        make_routing_decision(role="implementation.standard", model="GPT-6 Sol"),
+    )
+
+    assert outcome.state == WorkflowState.BLOCKED
+    assert outcome.blocker_reason is not None
+    assert "GPT-6 Sol" in outcome.blocker_reason
+    assert "codex update" in outcome.blocker_reason
 
 
 @pytest.mark.asyncio

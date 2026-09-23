@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from agentflow.agents.base import AgentRequest, AgentRole
+from agentflow.agents.base import AgentRequest, AgentRole, describe_agent_failure
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.config.models import LimitsConfig, VerificationGroup
 from agentflow.git.lock import WorktreeLock
@@ -27,6 +27,7 @@ from agentflow.workflow.verification import (
     CommandResult,
     VerificationResult,
     VerificationRunnerLike,
+    describe_verification_failure,
 )
 
 
@@ -193,7 +194,15 @@ class RepairWorkflow:
             attempts += 1
             failing = result.first_failure
             if failing is None:
-                break  # ERROR/TIMED_OUT with no isolated failing command; nothing to classify.
+                reason = self._verification_blocker_reason(run_id, result)
+                transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, reason)
+                return RepairOutcome(
+                    state=WorkflowState.BLOCKED,
+                    verification_result=result,
+                    attempts=attempts,
+                    final_tier=None,
+                    blocker_reason=reason,
+                )
             category = classify_failure(failing.command, failing.stdout, failing.stderr)
 
             if (
@@ -202,10 +211,7 @@ class RepairWorkflow:
             ):
                 if standard_failures >= self.limits.standard_failures:
                     if escalation_attempted:
-                        reason = (
-                            "Repair escalated to Claude Sonnet 5 but verification still fails; "
-                            "suspected architecture blocker."
-                        )
+                        reason = self._verification_blocker_reason(run_id, result)
                         transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, reason)
                         return RepairOutcome(
                             state=WorkflowState.BLOCKED,
@@ -228,7 +234,7 @@ class RepairWorkflow:
                 f"Repair attempt {attempts} ({tier.value}) for category '{category.value}'",
             )
 
-            await self._attempt_repair(
+            agent_failure = await self._attempt_repair(
                 run_id,
                 worktree_path,
                 project_context,
@@ -238,6 +244,15 @@ class RepairWorkflow:
                 category,
                 tier,
             )
+            if agent_failure is not None:
+                transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, agent_failure)
+                return RepairOutcome(
+                    state=WorkflowState.BLOCKED,
+                    verification_result=result,
+                    attempts=attempts,
+                    final_tier=tier,
+                    blocker_reason=agent_failure,
+                )
 
             transition_run_state(
                 self.db_manager,
@@ -265,6 +280,34 @@ class RepairWorkflow:
             final_tier=tier,
         )
 
+    def _verification_blocker_reason(self, run_id: str, result: VerificationResult) -> str:
+        """Report the last failing command and its saved output after repair exhaustion."""
+        reason = (
+            "Verification still fails after repair attempts. "
+            f"{describe_verification_failure(result)}"
+        )
+        failing = result.first_failure
+        if failing is None:
+            return reason
+
+        records = self.db_manager.list_verification_runs(run_id)
+        if not records:
+            return reason
+        latest = records[-1]
+        if latest.command != failing.command or latest.exit_code != failing.exit_code:
+            return reason
+        log_paths = [
+            path
+            for content, path in (
+                (failing.stdout, latest.stdout_path),
+                (failing.stderr, latest.stderr_path),
+            )
+            if content.strip() and path
+        ]
+        if log_paths:
+            reason += f" See verification log(s): {', '.join(log_paths)}."
+        return reason
+
     async def _attempt_repair(
         self,
         run_id: str,
@@ -275,8 +318,8 @@ class RepairWorkflow:
         failing: CommandResult,
         category: FailureCategory,
         tier: RepairTier,
-    ) -> None:
-        """Invoke the tier's adapter with a lock held, and record the resulting agent session."""
+    ) -> str | None:
+        """Invoke the tier's adapter and return an actionable reason on CLI failure."""
         ref = self.models_config.resolve(_TIER_ALIASES[tier], retired=self.retired_models)
         lock = WorktreeLock(worktree_path)
         lock.acquire()
@@ -311,6 +354,9 @@ class RepairWorkflow:
             result.session_id,
         )
         record_agent_completed(self.db_manager, run_id, WorkflowState.REPAIRING.value, result)
+        if not result.success:
+            return describe_agent_failure(result, "Repair agent")
+        return None
 
     @staticmethod
     def _verification_log_dir(project_context: ProjectContext, run_id: str) -> Path:

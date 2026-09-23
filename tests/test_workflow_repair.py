@@ -91,14 +91,17 @@ class ScriptedVerificationRunner:
         return self._results.pop(0)
 
 
-def make_agent_result(session_id: str = "sess-1") -> AgentResult:
+def make_agent_result(
+    session_id: str = "sess-1", exit_code: int = 0, stderr: str = ""
+) -> AgentResult:
     now = datetime.now(timezone.utc)
     return AgentResult(
         provider=Provider.OPENAI,
         model="gpt-6-luna",
         session_id=session_id,
-        exit_code=0,
+        exit_code=exit_code,
         text="fixed it",
+        stderr=stderr,
         started_at=now,
         completed_at=now,
     )
@@ -174,6 +177,32 @@ async def test_repair_succeeds_on_first_lightweight_attempt(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_repair_model_rejection_blocks_without_reverification(tmp_path: Path):
+    """A repair CLI model rejection is surfaced instead of being ignored by the loop."""
+    db, worktree_path, ctx, task_profile = make_environment(tmp_path)
+    registry = AgentAdapterRegistry()
+    registry.register(
+        Provider.OPENAI,
+        ScriptedAdapter(
+            Provider.OPENAI,
+            [make_agent_result(exit_code=1, stderr="Error: Unknown model gpt-6-luna")],
+        ),
+    )
+    verifier = ScriptedVerificationRunner([])
+    workflow = RepairWorkflow(db, registry, verifier, DEFAULT_MODELS_CONFIG)
+    initial = failed_result(make_command_result("ruff check .", stderr="E501 line too long"))
+
+    outcome = await workflow.run("run_1", worktree_path, ctx, "# Plan", task_profile, None, initial)
+
+    assert outcome.state == WorkflowState.BLOCKED
+    assert outcome.blocker_reason is not None
+    assert "codex update" in outcome.blocker_reason
+    assert verifier.calls == 0
+    assert db.get_run("run_1").state == WorkflowState.BLOCKED.value
+    assert not WorktreeLock(worktree_path).is_locked()
+
+
+@pytest.mark.asyncio
 async def test_lightweight_fails_twice_then_escalates_to_standard(tmp_path: Path):
     """Two lightweight (Luna) failures escalate the third attempt to the standard (Sol) tier."""
     db, worktree_path, ctx, task_profile = make_environment(tmp_path)
@@ -225,7 +254,7 @@ async def test_standard_fails_repeatedly_then_escalates_to_sonnet(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_escalation_failure_ends_blocked(tmp_path: Path):
-    """If even Claude Sonnet 5 cannot fix it, the run ends BLOCKED with a clear reason."""
+    """Exhausted repairs report the actual failing command and saved log."""
     db, worktree_path, ctx, task_profile = make_environment(tmp_path)
     registry = AgentAdapterRegistry()
     registry.register(
@@ -236,22 +265,62 @@ async def test_escalation_failure_ends_blocked(tmp_path: Path):
         Provider.ANTHROPIC, ScriptedAdapter(Provider.ANTHROPIC, [make_agent_result()])
     )
 
-    unit_failure = failed_result(make_command_result("pytest", stdout="FAILED test_foo"))
+    failing_command = make_command_result(
+        "pytest",
+        stdout=(
+            "ERROR ai-engine/tests - ModuleNotFoundError: No module named 'ai'\n"
+            "Interrupted: 14 errors during collection"
+        ),
+        exit_code=2,
+    )
+    unit_failure = failed_result(failing_command)
+    log_path = tmp_path / "verification" / "13.stdout.log"
+    log_path.parent.mkdir()
+    log_path.write_text(failing_command.stdout, encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    db.record_verification_run(
+        "verification-13", "run_1", "pytest", 2, now, now, stdout_path=str(log_path)
+    )
     verifier = ScriptedVerificationRunner([unit_failure, unit_failure, unit_failure])
-    limits = LimitsConfig(standard_failures=2, lightweight_verification_failures=2)
+    limits = LimitsConfig(standard_failures=2, lightweight_verification_failures=0)
     workflow = RepairWorkflow(db, registry, verifier, DEFAULT_MODELS_CONFIG, limits)
 
-    initial = failed_result(make_command_result("pytest", stdout="FAILED test_foo"))
-    outcome = await workflow.run("run_1", worktree_path, ctx, "# Plan", task_profile, None, initial)
+    outcome = await workflow.run(
+        "run_1", worktree_path, ctx, "# Plan", task_profile, None, unit_failure
+    )
 
     assert outcome.state == WorkflowState.BLOCKED
     assert outcome.final_tier == RepairTier.ESCALATION
     assert outcome.blocker_reason is not None
-    assert "architecture" in outcome.blocker_reason.lower()
+    assert "pytest" in outcome.blocker_reason
+    assert "exit code 2" in outcome.blocker_reason
+    assert "14 errors during pytest collection" in outcome.blocker_reason
+    assert "missing module 'ai'" in outcome.blocker_reason
+    assert str(log_path) in outcome.blocker_reason
+    assert "architecture" not in outcome.blocker_reason.lower()
 
     run = db.get_run("run_1")
     assert run is not None
     assert run.state == "BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_verification_without_failed_command_reports_status(tmp_path: Path):
+    """An abnormal verification result still gives a reason when no command is available."""
+    db, worktree_path, ctx, task_profile = make_environment(tmp_path)
+    workflow = RepairWorkflow(
+        db,
+        AgentAdapterRegistry(),
+        ScriptedVerificationRunner([]),
+        DEFAULT_MODELS_CONFIG,
+    )
+    initial = VerificationResult(status=VerificationStatus.ERROR)
+
+    outcome = await workflow.run("run_1", worktree_path, ctx, "# Plan", task_profile, None, initial)
+
+    assert outcome.state == WorkflowState.BLOCKED
+    assert outcome.blocker_reason is not None
+    assert "state ERROR" in outcome.blocker_reason
 
 
 @pytest.mark.asyncio
