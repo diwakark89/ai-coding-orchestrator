@@ -20,6 +20,7 @@ from agentflow.routing.decision import RoutingDecision
 from agentflow.task.profile import TaskProfile
 from agentflow.ui.console import ConsoleUI
 from agentflow.workflow.states import WorkflowState, transition_run_state
+from agentflow.workflow.verification import AGENT_VERIFICATION_GUIDANCE
 
 _TIER_ROLES: dict[str, AgentRole] = {
     "implementation.lightweight": AgentRole.LIGHTWEIGHT_CODER,
@@ -60,6 +61,7 @@ def _build_implementation_prompt(
         "- Only modify files inside this worktree.\n"
         "- Do not redesign the approved architecture.\n"
         "- Do not modify files unrelated to this task.\n\n"
+        f"{AGENT_VERIFICATION_GUIDANCE}\n\n"
         "If the plan is invalid or impossible to implement as written, stop and report the "
         "blocker instead of improvising a different design."
     )

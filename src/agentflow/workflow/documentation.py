@@ -24,7 +24,12 @@ from agentflow.task.profile import Stage, TaskProfile
 from agentflow.ui.console import ConsoleUI
 from agentflow.workflow.review import ReviewFinding
 from agentflow.workflow.states import WorkflowState
-from agentflow.workflow.verification import VerificationResult, VerificationRunnerLike
+from agentflow.workflow.verification import (
+    VerificationResult,
+    VerificationRunnerLike,
+    describe_verification_failure,
+    reverify_after_edit,
+)
 
 
 @dataclass
@@ -182,11 +187,22 @@ class DocumentationWorkflow:
 
         verification_after: VerificationResult | None = None
         if verification_config:
-            verification_after = await self.verification_runner.run(
-                run_id, worktree_path, verification_config
+            verification_after = await reverify_after_edit(
+                self.verification_runner,
+                run_id,
+                worktree_path,
+                verification_config,
+                log_dir=project_context.root_path
+                / ".ai-orchestrator"
+                / "runs"
+                / run_id
+                / "verification",
             )
             if not verification_after.success:
-                reason = "Documentation changes broke verification."
+                reason = (
+                    "Documentation changes broke verification. "
+                    + describe_verification_failure(verification_after)
+                )
                 return DocumentationOutcome(
                     enabled=True,
                     updated_files=diff.changed_files,

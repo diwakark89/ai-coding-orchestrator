@@ -1395,14 +1395,45 @@ verification:
     detect:
       - pyproject.toml
     commands:
-      - pytest
+      - python -m pytest
 ```
 
 ---
 
 ### 2. Detect applicable verification groups
 
-Run only groups whose configured detection conditions match.
+First check `detect` markers, then select groups from staged, unstaged, and
+untracked worktree paths. A path selects the most specific configured component
+directory, so a module change runs its module tests without also running an
+ancestor reactor. Changes in several components select their union. Root-level and unmapped
+paths are shared by default and select all applicable groups. Documentation files (`.md`,
+`.markdown`, `.rst`, `.adoc`) select no group unless `scope_paths` claims them, so a doc
+edit never widens verification. After a repair or review fix, rerun the failed group first,
+then only groups whose inputs changed; unaffected passes are retained without a final full pass. If Git scope is
+unavailable or empty, run all applicable groups. `scope_paths` can map known
+shared paths to the exact groups that depend on them, or add required checks for
+a component path.
+
+For a service in a subdirectory, set `working_directory` to that repository-relative
+directory. Detection markers remain relative to the repository root. For example,
+`detect: [ai-engine/pyproject.toml]` with `working_directory: ai-engine` runs
+the tests in the worktree component using the original project's
+`ai-engine/.venv` interpreter. Both `python -m pytest` and legacy bare `pytest`
+commands resolve to that interpreter. A missing or unusable component virtualenv
+blocks verification with an explicit error.
+
+Declare duplicate suites explicitly with `supersedes`. For example, if root
+`npm test` and `front-end` both execute the same Jest suite, use
+`front-end: {supersedes: [root-node]}` after naming the root group `root-node`.
+If a Maven reactor runs all module tests, its group may supersede those module
+groups when both are selected by a shared change or explicit mapping. A change
+inside one module selects only that module by default. Do not declare a group
+covered when it has additional required checks.
+Existing routing profiles need no migration for scoped selection; known
+overlaps need an explicit `supersedes` declaration to avoid duplicate runs.
+Generated Node groups require a nonempty `scripts.test` entry. In an existing
+profile, remove a root `npm test` group when the root package has no test
+script; declare overlap only when both commands really run the same suite.
 
 ---
 
@@ -1429,6 +1460,7 @@ PASSED
 FAILED
 ERROR
 TIMED_OUT
+INTERMITTENT
 ```
 
 ---
@@ -1506,11 +1538,16 @@ If Sonnet identifies architecture blocker:
 
 ---
 
-### 8. Re-run full verification after repair
+### 8. Re-run affected verification after repair, then perform the final gate
 
-Do not only rerun the previously failing command before declaring success.
+First rerun the failed group and groups affected by new repair edits. Reuse
+passing results only for groups whose relevant files did not change. A timeout-
+like failure gets one bounded reproduction check before a coding-agent repair;
+a passing retry is intermittent evidence, not a successful final check.
+The retry uses `limits.reproduction_timeout_seconds` (default 300 seconds).
 
-Final success requires configured verification sequence to pass.
+Final success requires a fresh pass of every group required by the current
+worktree changes. If that pass fails, return to the bounded repair loop.
 
 ---
 
@@ -1537,7 +1574,8 @@ Automated fixture scenarios:
 - repair succeeds first time;
 - Luna fails twice → Sol;
 - Sol fails configured limit → escalation;
-- final verification re-runs complete sequence.
+- repair scope expands when edits touch another component;
+- final verification re-runs every required affected group.
 
 No AI-generated statement may mark verification successful.
 

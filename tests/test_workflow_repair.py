@@ -13,7 +13,14 @@ from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
 from agentflow.routing.rules import DEFAULT_MODELS_CONFIG
 from agentflow.task.profile import Stage, TaskProfile
-from agentflow.workflow.repair import FailureCategory, RepairTier, RepairWorkflow, classify_failure
+from agentflow.workflow.repair import (
+    FailureCategory,
+    RepairTier,
+    RepairWorkflow,
+    classify_failure,
+    is_environment_failure,
+    is_potentially_intermittent,
+)
 from agentflow.workflow.states import WorkflowState
 from agentflow.workflow.verification import CommandResult, VerificationResult, VerificationStatus
 
@@ -127,6 +134,34 @@ def failed_result(command_result: CommandResult) -> VerificationResult:
     )
 
 
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("ModuleNotFoundError: No module named 'prometheus_client'", True),
+        ("Cannot find module 'jest'", True),
+        ('npm error Missing script: "test"', True),
+        ("Executable not found: mvn", True),
+        ("AssertionError: expected 42", False),
+    ],
+)
+def test_environment_failure_classification(stderr: str, expected: bool):
+    result = failed_result(make_command_result("test", stderr=stderr))
+    assert is_environment_failure(result) is expected
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("Exceeded timeout of 5000 ms for a test", True),
+        ("Async callback was not invoked within the timeout", True),
+        ("AssertionError: expected 42", False),
+    ],
+)
+def test_intermittent_failure_classification(stderr: str, expected: bool):
+    result = failed_result(make_command_result("npm test", stderr=stderr))
+    assert is_potentially_intermittent(result) is expected
+
+
 def passed_result() -> VerificationResult:
     return VerificationResult(
         status=VerificationStatus.PASSED,
@@ -154,6 +189,99 @@ def make_environment(tmp_path: Path):
 
 
 # --- 3. RepairWorkflow loop scenarios -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verification_environment_error_blocks_without_repair(tmp_path: Path):
+    db, worktree_path, ctx, task_profile = make_environment(tmp_path)
+    registry = AgentAdapterRegistry()
+    adapter = ScriptedAdapter(Provider.OPENAI, [])
+    registry.register(Provider.OPENAI, adapter)
+    verifier = ScriptedVerificationRunner([])
+    workflow = RepairWorkflow(db, registry, verifier, DEFAULT_MODELS_CONFIG)
+    initial = VerificationResult(
+        status=VerificationStatus.ERROR,
+        groups_run=["ai-engine"],
+        command_results=[
+            make_command_result(
+                "python -m pytest",
+                exit_code=127,
+                stderr="Python virtualenv interpreter for group 'ai-engine' is missing or unusable",
+            )
+        ],
+    )
+
+    outcome = await workflow.run("run_1", worktree_path, ctx, "# Plan", task_profile, None, initial)
+
+    assert outcome.state == WorkflowState.BLOCKED
+    assert outcome.attempts == 0
+    assert "Python virtualenv interpreter" in (outcome.blocker_reason or "")
+    assert adapter.calls == 0
+    assert verifier.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_dependency_blocks_without_agent_repair(tmp_path: Path):
+    db, worktree_path, ctx, task_profile = make_environment(tmp_path)
+    registry = AgentAdapterRegistry()
+    adapter = ScriptedAdapter(Provider.OPENAI, [])
+    registry.register(Provider.OPENAI, adapter)
+    workflow = RepairWorkflow(db, registry, ScriptedVerificationRunner([]), DEFAULT_MODELS_CONFIG)
+    initial = failed_result(
+        make_command_result(
+            "python -m pytest",
+            stderr="ModuleNotFoundError: No module named 'prometheus_client'",
+        )
+    )
+
+    outcome = await workflow.run("run_1", worktree_path, ctx, "# Plan", task_profile, None, initial)
+
+    assert outcome.state == WorkflowState.BLOCKED
+    assert outcome.attempts == 0
+    assert "missing module 'prometheus_client'" in (outcome.blocker_reason or "")
+    assert adapter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_timeout_reproduction_pass_blocks_without_agent_repair(tmp_path: Path):
+    db, worktree_path, ctx, task_profile = make_environment(tmp_path)
+    registry = AgentAdapterRegistry()
+    adapter = ScriptedAdapter(Provider.OPENAI, [])
+    registry.register(Provider.OPENAI, adapter)
+
+    class ReproducingVerifier(ScriptedVerificationRunner):
+        seen_timeout: float | None = None
+
+        async def reproduce_failure(
+            self,
+            run_id,
+            worktree_path,
+            verification_config,
+            result,
+            log_dir=None,
+            timeout_seconds=None,
+        ):
+            self.seen_timeout = timeout_seconds
+            result.reproduction_result = make_command_result("npm test", exit_code=0)
+            result.status = VerificationStatus.INTERMITTENT
+            return result
+
+    verifier = ReproducingVerifier([])
+    workflow = RepairWorkflow(db, registry, verifier, DEFAULT_MODELS_CONFIG)
+    initial = failed_result(
+        make_command_result(
+            "npm test",
+            stderr="Exceeded timeout of 5000 ms",
+        )
+    )
+
+    outcome = await workflow.run("run_1", worktree_path, ctx, "# Plan", task_profile, None, initial)
+
+    assert outcome.state == WorkflowState.BLOCKED
+    assert outcome.attempts == 0
+    assert "did not reproduce" in (outcome.blocker_reason or "")
+    assert adapter.calls == 0
+    assert verifier.seen_timeout == 300.0
 
 
 @pytest.mark.asyncio
@@ -268,8 +396,7 @@ async def test_escalation_failure_ends_blocked(tmp_path: Path):
     failing_command = make_command_result(
         "pytest",
         stdout=(
-            "ERROR ai-engine/tests - ModuleNotFoundError: No module named 'ai'\n"
-            "Interrupted: 14 errors during collection"
+            "FAILED ai-engine/tests/test_worker.py::test_run - AssertionError\n1 failed, 120 passed"
         ),
         exit_code=2,
     )
@@ -294,8 +421,7 @@ async def test_escalation_failure_ends_blocked(tmp_path: Path):
     assert outcome.blocker_reason is not None
     assert "pytest" in outcome.blocker_reason
     assert "exit code 2" in outcome.blocker_reason
-    assert "14 errors during pytest collection" in outcome.blocker_reason
-    assert "missing module 'ai'" in outcome.blocker_reason
+    assert "failed test 'ai-engine/tests/test_worker.py::test_run'" in outcome.blocker_reason
     assert str(log_path) in outcome.blocker_reason
     assert "architecture" not in outcome.blocker_reason.lower()
 
@@ -358,3 +484,26 @@ async def test_agent_sessions_are_recorded_for_each_repair_attempt(tmp_path: Pat
     assert len(sessions) == 1
     assert sessions[0].model == "GPT-6 Luna"
     assert sessions[0].stage == "REPAIRING"
+
+
+def test_agent_prompts_defer_full_verification_to_the_orchestrator():
+    from agentflow.workflow.implementation import _build_implementation_prompt
+    from agentflow.workflow.repair import FailureCategory, _build_repair_prompt
+    from agentflow.workflow.review import _build_review_fix_prompt
+    from agentflow.workflow.verification import AGENT_VERIFICATION_GUIDANCE
+
+    profile = TaskProfile(
+        stage=Stage.IMPLEMENTATION, technologies=set(), affected_layers=set(), estimated_files=1
+    )
+    now = datetime.now(timezone.utc)
+    failing = CommandResult(
+        command="mvn test", exit_code=1, stdout="", stderr="", started_at=now, completed_at=now
+    )
+    prompts = [
+        _build_implementation_prompt("task", "plan", profile, Path("wt")),
+        _build_repair_prompt("plan", profile, failing, FailureCategory.UNIT_TEST),
+        _build_review_fix_prompt("plan", profile, []),
+    ]
+    for prompt in prompts:
+        assert AGENT_VERIFICATION_GUIDANCE in prompt
+    assert "not 'mvn test' in full" in prompts[1]

@@ -3,7 +3,8 @@
 Verification failures are classified with fixed keyword/command patterns (never AI
 classification), routed to the cheapest capable repair tier, and escalated
 (Luna -> Sol -> Sonnet) only after each tier repeatedly fails. Success is only ever
-declared after a full re-run of the configured verification sequence.
+declared after every affected verification group passes against the current files;
+passes are reused only for groups whose inputs the repair did not change.
 """
 
 import uuid
@@ -24,10 +25,13 @@ from agentflow.task.profile import TaskProfile
 from agentflow.ui.console import ConsoleUI
 from agentflow.workflow.states import WorkflowState, transition_run_state
 from agentflow.workflow.verification import (
+    AGENT_VERIFICATION_GUIDANCE,
     CommandResult,
     VerificationResult,
     VerificationRunnerLike,
+    VerificationStatus,
     describe_verification_failure,
+    reverify_after_edit,
 )
 
 
@@ -65,11 +69,55 @@ _MISSING_IMPORT_KEYWORDS = (
     "cannot find symbol",
     "unresolved import",
     "no module named",
+    "cannot find module",
+    "err_module_not_found",
+    "could not resolve dependencies for project",
 )
 _TYPE_MISMATCH_KEYWORDS = ("typeerror", "type mismatch", "incompatible type")
 _COMPILATION_KEYWORDS = ("syntaxerror", "compilation error", "compile error", "error: expected")
 _TRANSACTION_KEYWORDS = ("deadlock", "transaction", "rollback")
 _DATABASE_KEYWORDS = ("database", "sqlstate", "connection refused", "sql error")
+_ENVIRONMENT_PATTERNS = (
+    "no module named",
+    "cannot find module",
+    "err_module_not_found",
+    "could not resolve dependencies for project",
+    "missing script:",
+    "executable not found",
+    "command not found",
+    "is not recognized as an internal or external command",
+    "failed to execute subprocess",
+    "could not find or load main class",
+)
+_INTERMITTENT_PATTERNS = (
+    "exceeded timeout",
+    "test timed out",
+    "async callback was not invoked",
+    "timeout of ",
+    "timed out",
+)
+
+
+def is_environment_failure(result: VerificationResult) -> bool:
+    """Separate setup failures from code failures before spending a repair attempt."""
+    if result.status == VerificationStatus.ERROR:
+        return True
+    failure = result.first_failure
+    if failure is None:
+        return False
+    output = f"{failure.stdout}\n{failure.stderr}".lower()
+    return any(pattern in output for pattern in _ENVIRONMENT_PATTERNS)
+
+
+def is_potentially_intermittent(result: VerificationResult) -> bool:
+    """One bounded reproduction is warranted for timeout-like test failures."""
+    if result.status == VerificationStatus.TIMED_OUT:
+        return True
+    failure = result.first_failure
+    if failure is None:
+        return False
+    output = f"{failure.stdout}\n{failure.stderr}".lower()
+    return any(pattern in output for pattern in _INTERMITTENT_PATTERNS)
 
 
 def classify_failure(command: str, stdout: str, stderr: str) -> FailureCategory:
@@ -147,7 +195,10 @@ def _build_repair_prompt(
         f"stderr:\n{failing.stderr[-4000:]}\n\n"
         "Fix only what is necessary to make verification pass. Do not redesign the approved "
         "architecture. If the failure indicates an architectural problem rather than an "
-        "implementation bug, stop and report the blocker instead of attempting a workaround."
+        "implementation bug, stop and report the blocker instead of attempting a workaround.\n\n"
+        f"{AGENT_VERIFICATION_GUIDANCE}\n"
+        f"- To confirm your fix, rerun only the failing test(s) named above, not "
+        f"'{failing.command}' in full."
     )
 
 
@@ -191,6 +242,40 @@ class RepairWorkflow:
         tier = RepairTier.LIGHTWEIGHT
 
         while not result.success:
+            if is_environment_failure(result) or result.status == VerificationStatus.INTERMITTENT:
+                reason = self._verification_blocker_reason(run_id, result)
+                transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, reason)
+                return RepairOutcome(
+                    state=WorkflowState.BLOCKED,
+                    verification_result=result,
+                    attempts=attempts,
+                    final_tier=None,
+                    blocker_reason=reason,
+                )
+            if is_potentially_intermittent(result) and result.reproduction_result is None:
+                reproduce = getattr(self.verification_runner, "reproduce_failure", None)
+                if reproduce is None:
+                    reason = (
+                        "Verification timed out or may be intermittent; bounded reproduction "
+                        "is unavailable. " + self._verification_blocker_reason(run_id, result)
+                    )
+                    transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, reason)
+                    return RepairOutcome(
+                        state=WorkflowState.BLOCKED,
+                        verification_result=result,
+                        attempts=attempts,
+                        blocker_reason=reason,
+                    )
+                result = await reproduce(
+                    run_id,
+                    worktree_path,
+                    verification_config,
+                    result,
+                    log_dir=self._verification_log_dir(project_context, run_id),
+                    timeout_seconds=self.limits.reproduction_timeout_seconds,
+                )
+                if result.status == VerificationStatus.INTERMITTENT:
+                    continue
             attempts += 1
             failing = result.first_failure
             if failing is None:
@@ -260,7 +345,8 @@ class RepairWorkflow:
                 WorkflowState.VERIFYING,
                 f"Re-verifying after {tier.value} repair",
             )
-            result = await self.verification_runner.run(
+            result = await reverify_after_edit(
+                self.verification_runner,
                 run_id,
                 worktree_path,
                 verification_config,
@@ -282,10 +368,20 @@ class RepairWorkflow:
 
     def _verification_blocker_reason(self, run_id: str, result: VerificationResult) -> str:
         """Report the last failing command and its saved output after repair exhaustion."""
-        reason = (
-            "Verification still fails after repair attempts. "
-            f"{describe_verification_failure(result)}"
+        prefix = (
+            "Verification could not run. "
+            if is_environment_failure(result)
+            else "Verification failure did not reproduce. "
+            if result.status == VerificationStatus.INTERMITTENT
+            else "Verification still fails after repair attempts. "
         )
+        reason = prefix + describe_verification_failure(result)
+        if result.groups_run:
+            reason += f" Selected groups: {', '.join(result.groups_run)}."
+        if result.failed_group:
+            reason += f" Failed group: {result.failed_group}."
+        if result.rerun_groups:
+            reason += f" Rerun groups: {', '.join(result.rerun_groups)}."
         failing = result.first_failure
         if failing is None:
             return reason
@@ -293,17 +389,45 @@ class RepairWorkflow:
         records = self.db_manager.list_verification_runs(run_id)
         if not records:
             return reason
-        latest = records[-1]
-        if latest.command != failing.command or latest.exit_code != failing.exit_code:
-            return reason
-        log_paths = [
-            path
-            for content, path in (
-                (failing.stdout, latest.stdout_path),
-                (failing.stderr, latest.stderr_path),
+        matching = next(
+            (
+                record
+                for record in reversed(records)
+                if record.command == failing.command and record.exit_code == failing.exit_code
+            ),
+            None,
+        )
+        log_paths: list[str] = []
+        if matching is not None:
+            log_paths.extend(
+                path
+                for content, path in (
+                    (failing.stdout, matching.stdout_path),
+                    (failing.stderr, matching.stderr_path),
+                )
+                if content.strip() and path
             )
-            if content.strip() and path
-        ]
+        retry = result.reproduction_result
+        if retry is not None:
+            reproduced = next(
+                (
+                    record
+                    for record in reversed(records)
+                    if record.command == retry.command
+                    and record.exit_code == retry.exit_code
+                    and (matching is None or record.id != matching.id)
+                ),
+                None,
+            )
+            if reproduced is not None:
+                log_paths.extend(
+                    path
+                    for content, path in (
+                        (retry.stdout, reproduced.stdout_path),
+                        (retry.stderr, reproduced.stderr_path),
+                    )
+                    if content.strip() and path
+                )
         if log_paths:
             reason += f" See verification log(s): {', '.join(log_paths)}."
         return reason

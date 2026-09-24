@@ -41,7 +41,13 @@ from agentflow.routing.rules import ModelsConfig, RoleOverride, RoutingRulesConf
 from agentflow.task.profile import Stage, TaskProfile
 from agentflow.ui.console import ConsoleUI
 from agentflow.workflow.states import WorkflowState, transition_run_state
-from agentflow.workflow.verification import VerificationResult, VerificationRunnerLike
+from agentflow.workflow.verification import (
+    AGENT_VERIFICATION_GUIDANCE,
+    VerificationResult,
+    VerificationRunnerLike,
+    describe_verification_failure,
+    reverify_after_edit,
+)
 
 
 class ReviewSeverity(str, Enum):
@@ -165,7 +171,8 @@ def _build_review_fix_prompt(
         f"Mandatory findings to resolve:\n{listed}\n\n"
         "Fix only these findings. Do not redesign the approved architecture. If a finding "
         "indicates an architectural problem you cannot resolve without redesigning the "
-        "approach, stop and report the blocker instead of attempting a workaround."
+        "approach, stop and report the blocker instead of attempting a workaround.\n\n"
+        f"{AGENT_VERIFICATION_GUIDANCE}"
     )
 
 
@@ -339,11 +346,21 @@ class ReviewWorkflow:
             transition_run_state(
                 self.db_manager, run_id, WorkflowState.VERIFYING, "Re-verifying after review fix"
             )
-            current_verification = await self.verification_runner.run(
-                run_id, worktree_path, verification_config
+            current_verification = await reverify_after_edit(
+                self.verification_runner,
+                run_id,
+                worktree_path,
+                verification_config,
+                log_dir=project_context.root_path
+                / ".ai-orchestrator"
+                / "runs"
+                / run_id
+                / "verification",
             )
             if not current_verification.success:
-                reason = "Review fix broke verification; a full re-verification did not pass."
+                reason = "Review fix broke verification. " + describe_verification_failure(
+                    current_verification
+                )
                 transition_run_state(self.db_manager, run_id, WorkflowState.BLOCKED, reason)
                 return ReviewOutcome(
                     state=WorkflowState.BLOCKED,

@@ -179,6 +179,15 @@ class Application:
         self.agent_registry = agent_registry or create_default_registry(
             config=self.config, executor=self.executor
         )
+        self._verification_runners: dict[str, VerificationRunner] = {}
+
+    def _verification_runner(self, run_id: str) -> VerificationRunner:
+        """One runner per run, so review/doc re-verification can reuse unaffected passes."""
+        runner = self._verification_runners.get(run_id)
+        if runner is None:
+            runner = VerificationRunner(self.db_manager, executor=self.executor, console_ui=self.ui)
+            self._verification_runners[run_id] = runner
+        return runner
 
     def initialize(self) -> None:
         """Initialize required directories and persistence database."""
@@ -846,9 +855,7 @@ class Application:
         to exist.
         """
         cfg = routing_config
-        verification_runner = VerificationRunner(
-            self.db_manager, executor=self.executor, console_ui=self.ui
-        )
+        verification_runner = self._verification_runner(run_id)
         verification_config = cfg.verification if cfg else None
         log_dir = ctx.root_path / ".ai-orchestrator" / "runs" / run_id / "verification"
         verification = await verification_runner.run(
@@ -1007,9 +1014,7 @@ class Application:
         ) or DEFAULT_ROUTING_RULES
         limits = routing_config.limits if routing_config else None
 
-        verification_runner = VerificationRunner(
-            self.db_manager, executor=self.executor, console_ui=self.ui
-        )
+        verification_runner = self._verification_runner(run_id)
         worktree_manager = WorktreeManager(self.config.worktrees.root, executor=self.executor)
 
         transition_run_state(

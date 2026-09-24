@@ -33,7 +33,13 @@ def test_final_summary_renders_all_required_sections():
         routing_decisions=[make_routing_decision_record()],
         changed_files=["src/app.py"],
         verification_result=VerificationResult(
-            status=VerificationStatus.PASSED, groups_run=["py"], command_results=[]
+            status=VerificationStatus.PASSED,
+            groups_run=["py"],
+            selection_reasons={"py": ["changed: src/app.py"]},
+            rerun_groups=["py"],
+            cached_groups=["js"],
+            documentation_only_paths=["README.md"],
+            command_results=[],
         ),
         review_findings=[
             ReviewFinding(
@@ -58,6 +64,10 @@ def test_final_summary_renders_all_required_sections():
     assert "GPT-6 Luna" in markdown
     assert "src/app.py" in markdown
     assert "PASSED" in markdown
+    assert "py: changed: src/app.py" in markdown
+    assert "Ran in last pass: py" in markdown
+    assert "Retained earlier passes (inputs unchanged): js" in markdown
+    assert "Documentation-only files (no group required): 1" in markdown
     assert "Minor style nit." in markdown
     assert "architecture.md" in markdown
     assert "Gemini CLI not installed." in markdown

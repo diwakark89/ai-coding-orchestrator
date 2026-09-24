@@ -61,6 +61,33 @@ class FinalSummary:
 
         lines += ["", "## Verification Status", ""]
         lines.append(self.verification_result.status.value if self.verification_result else "N/A")
+        if self.verification_result:
+            result = self.verification_result
+            lines.extend(["", "### Required Groups", ""])
+            if result.groups_run:
+                for name in result.groups_run:
+                    reason = ", ".join(result.selection_reasons.get(name, [])) or "configured check"
+                    lines.append(f"- {name}: {reason}")
+            else:
+                lines.append("- (none)")
+            if result.suppressed_groups:
+                lines.extend(["", "### Covered Duplicate Groups", ""])
+                lines.extend(
+                    f"- {name}: covered by {covering}"
+                    for name, covering in result.suppressed_groups.items()
+                )
+            lines.extend(["", "### Verification Runs", ""])
+            lines.append(f"- Ran in last pass: {', '.join(result.rerun_groups) or '(none)'}")
+            if result.cached_groups:
+                lines.append(
+                    f"- Retained earlier passes (inputs unchanged): "
+                    f"{', '.join(result.cached_groups)}"
+                )
+            if result.documentation_only_paths:
+                lines.append(
+                    f"- Documentation-only files (no group required): "
+                    f"{len(result.documentation_only_paths)}"
+                )
 
         lines += ["", "## Review Status", ""]
         if self.review_findings:

@@ -5,6 +5,7 @@ full test/build setup from marker files alone, so the generated config always ne
 review pass before real tasks are routed against it.
 """
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -60,8 +61,8 @@ _SKIP_DIR_NAMES = frozenset(
 # under two different guessed commands for the same group.
 _MARKERS: tuple[tuple[str, str, str], ...] = (
     ("package.json", "node", "npm test"),
-    ("pyproject.toml", "python", "pytest"),
-    ("requirements.txt", "python", "pytest"),
+    ("pyproject.toml", "python", "python -m pytest"),
+    ("requirements.txt", "python", "python -m pytest"),
     ("pom.xml", "java", "mvn test"),
 )
 
@@ -72,6 +73,16 @@ def _marker_for(directory: Path) -> tuple[str, str, str] | None:
     """Return (marker_name, group_kind, command) for the first matching marker in `directory`."""
     for marker_name, group_kind, command in _MARKERS:
         if (directory / marker_name).exists():
+            if marker_name == "package.json":
+                try:
+                    package = json.loads((directory / marker_name).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
+                if not isinstance(scripts, dict) or not isinstance(scripts.get("test"), str):
+                    continue
+                if not scripts["test"].strip():
+                    continue
             return marker_name, group_kind, command
     return None
 
@@ -91,7 +102,12 @@ def detect_verification_groups(root_path: Path) -> dict[str, VerificationGroup]:
         while unique_name in groups:
             unique_name = f"{name}-{suffix}"
             suffix += 1
-        groups[unique_name] = VerificationGroup(detect=[marker_relative], commands=[command])
+        working_directory = Path(marker_relative).parent.as_posix()
+        groups[unique_name] = VerificationGroup(
+            detect=[marker_relative],
+            working_directory=working_directory,
+            commands=[command],
+        )
 
     root_marker = _marker_for(root_path)
     if root_marker is not None:

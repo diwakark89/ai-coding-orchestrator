@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from agentflow.config.models import VerificationGroup
+from agentflow.errors import ConfigurationError, ProcessExecutionError
 from agentflow.persistence.database import DatabaseManager
+from agentflow.process.executor import ProcessResult
 from agentflow.workflow.verification import (
     CommandResult,
     VerificationResult,
@@ -197,6 +199,167 @@ async def test_only_applicable_groups_run(tmp_path: Path):
     assert result.status == VerificationStatus.PASSED
 
 
+@pytest.mark.asyncio
+async def test_command_runs_in_configured_subdirectory(tmp_path: Path):
+    """A nested Python project's pytest configuration must be resolved from its own root."""
+    service = tmp_path / "service"
+    service.mkdir()
+    (service / "pyproject.toml").write_text("", encoding="utf-8")
+    script = _write_script(
+        service, "check_cwd.py", "from pathlib import Path\nassert Path.cwd().name == 'service'\n"
+    )
+    runner = _new_runner(tmp_path)
+    config = {
+        "service": VerificationGroup(
+            detect=["service/pyproject.toml"],
+            working_directory="service",
+            commands=[f"{PY} {script.name}"],
+        )
+    }
+
+    result = await runner.run("run_1", tmp_path, config)
+
+    assert result.status == VerificationStatus.PASSED
+
+
+@pytest.mark.asyncio
+async def test_command_rejects_working_directory_outside_worktree(tmp_path: Path):
+    (tmp_path / "marker").write_text("", encoding="utf-8")
+    runner = _new_runner(tmp_path)
+    config = {
+        "unsafe": VerificationGroup(
+            detect=["marker"], working_directory="..", commands=[_passing_command()]
+        )
+    }
+
+    with pytest.raises(ConfigurationError, match="inside the worktree"):
+        await runner.run("run_1", tmp_path, config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["pytest -q", "python -m pytest -q"])
+@pytest.mark.parametrize("venv_path", [("Scripts", "python.exe"), ("bin", "python")])
+async def test_pytest_uses_original_component_venv_for_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    venv_path: tuple[str, str],
+):
+    original = tmp_path / "original"
+    worktree = tmp_path / "worktree"
+    component = original / "ai-engine"
+    worktree_component = worktree / "ai-engine"
+    worktree_component.mkdir(parents=True)
+    (worktree_component / "pyproject.toml").write_text("", encoding="utf-8")
+    interpreter = component / ".venv" / Path(*venv_path)
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"test executable")
+    interpreter.chmod(0o755)
+    unrelated = original / ".venv"
+    unrelated.mkdir()
+    monkeypatch.setenv("VIRTUAL_ENV", str(unrelated))
+    monkeypatch.setenv("PATH", str(unrelated / "Scripts"))
+
+    db = DatabaseManager(tmp_path / "test.db")
+    db.initialize()
+    db.upsert_project("proj_1", "Project One", str(original))
+    db.create_run(run_id="run_1", project_id="proj_1", task="Do a thing")
+    calls = []
+
+    async def fake_run(cmd_args, cwd, timeout=None):
+        if cmd_args[0] != "git":
+            calls.append((cmd_args, cwd))
+        now = datetime.now(timezone.utc)
+        return ProcessResult(
+            command=list(cmd_args),
+            exit_code=0,
+            stdout="",
+            stderr="",
+            started_at=now,
+            completed_at=now,
+        )
+
+    runner = VerificationRunner(db)
+    monkeypatch.setattr(runner.executor, "run", fake_run)
+    config = {
+        "ai-engine": VerificationGroup(
+            detect=["ai-engine/pyproject.toml"],
+            working_directory="ai-engine",
+            commands=[command],
+        )
+    }
+
+    result = await runner.run("run_1", worktree, config)
+
+    assert result.status == VerificationStatus.PASSED
+    assert calls == [([str(interpreter), "-m", "pytest", "-q"], worktree_component)]
+
+
+@pytest.mark.asyncio
+async def test_pytest_missing_component_venv_reports_error_without_path_fallback(tmp_path: Path):
+    original = tmp_path / "original"
+    worktree = tmp_path / "worktree"
+    (worktree / "data-processor").mkdir(parents=True)
+    (worktree / "data-processor" / "requirements.txt").write_text("", encoding="utf-8")
+    db = DatabaseManager(tmp_path / "test.db")
+    db.initialize()
+    db.upsert_project("proj_1", "Project One", str(original))
+    db.create_run(run_id="run_1", project_id="proj_1", task="Do a thing")
+    runner = VerificationRunner(db)
+    config = {
+        "data-processor": VerificationGroup(
+            detect=["data-processor/requirements.txt"],
+            working_directory="data-processor",
+            commands=["pytest"],
+        )
+    }
+
+    result = await runner.run("run_1", worktree, config)
+
+    assert result.status == VerificationStatus.ERROR
+    assert result.first_failure is not None
+    assert "Python virtualenv interpreter" in result.first_failure.stderr
+    assert "data-processor" in result.first_failure.stderr
+    assert "missing or unusable" in describe_verification_failure(result)
+
+
+@pytest.mark.asyncio
+async def test_pytest_unusable_component_interpreter_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    original = tmp_path / "original"
+    worktree = tmp_path / "worktree"
+    (worktree / "service").mkdir(parents=True)
+    interpreter = original / "service" / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"broken")
+    interpreter.chmod(0o755)
+    db = DatabaseManager(tmp_path / "test.db")
+    db.initialize()
+    db.upsert_project("proj_1", "Project One", str(original))
+    db.create_run(run_id="run_1", project_id="proj_1", task="Do a thing")
+    runner = VerificationRunner(db)
+
+    async def fail_run(cmd_args, cwd, timeout=None):
+        raise ProcessExecutionError("invalid executable")
+
+    monkeypatch.setattr(runner.executor, "run", fail_run)
+    result = await runner.run(
+        "run_1",
+        worktree,
+        {
+            "service": VerificationGroup(
+                working_directory="service",
+                commands=["pytest"],
+            )
+        },
+    )
+
+    assert result.status == VerificationStatus.ERROR
+    assert result.first_failure is not None
+    assert "Python virtualenv interpreter is unusable" in result.first_failure.stderr
+
+
 # --- 3. Persistence -------------------------------------------------------------------------
 
 
@@ -219,7 +382,14 @@ async def test_verification_runs_are_persisted_to_db(tmp_path: Path):
     events = db.list_events("run_db")
     assert len(events) == 1
     assert events[0].event == "VERIFICATION_COMPLETED"
-    assert events[0].attributes == {"command_count": 1, "status": "PASSED", "success": True}
+    assert events[0].attributes == {
+        "command_count": 1,
+        "status": "PASSED",
+        "success": True,
+        "phase": "initial",
+        "selected_group_count": 1,
+        "cached_group_count": 0,
+    }
 
 
 @pytest.mark.asyncio

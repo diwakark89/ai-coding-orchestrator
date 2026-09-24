@@ -268,6 +268,6 @@ async def test_pipeline_repairs_a_failing_verification(
     assert codex.calls == 2
 
     verifications = app_instance.db_manager.list_verification_runs(outcome.planning_outcome.run_id)
-    assert len(verifications) == 2
+    assert len(verifications) == 2  # initial failure, scoped repair (no redundant full pass)
     assert verifications[0].exit_code == 1
     assert verifications[1].exit_code == 0

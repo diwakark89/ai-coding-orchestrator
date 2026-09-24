@@ -672,9 +672,7 @@ async def test_resume_blocked_run_retries_from_recovered_stage(
 
 
 @pytest.mark.asyncio
-async def test_resume_blocked_run_with_no_recoverable_stage_raises(
-    git_repo: Path, tmp_path: Path
-):
+async def test_resume_blocked_run_with_no_recoverable_stage_raises(git_repo: Path, tmp_path: Path):
     """A BLOCKED run whose only recorded prior state is NEW cannot be resumed."""
     registry, *_ = make_registry()
     app_instance = make_app(registry, tmp_path)

@@ -146,11 +146,25 @@ class ProjectMetaConfig(BaseModel):
 
 
 class VerificationGroup(BaseModel):
-    """A named verification group: files whose presence enables it, and commands to run."""
+    """A named verification group and its repository-relative execution directory."""
 
     model_config = ConfigDict(extra="ignore")
     detect: list[str] = Field(default_factory=list)
+    working_directory: str = "."
+    scope_paths: list[str] = Field(default_factory=list)
+    supersedes: list[str] = Field(default_factory=list)
     commands: list[str] = Field(default_factory=list)
+
+    @field_validator("scope_paths")
+    @classmethod
+    def _validate_scope_paths(cls, paths: list[str]) -> list[str]:
+        for path in paths:
+            normalized = path.replace("\\", "/")
+            if not normalized or normalized.startswith("/") or ":" in normalized:
+                raise ValueError("Verification scope_paths must be repository-relative patterns.")
+            if ".." in normalized.split("/"):
+                raise ValueError("Verification scope_paths cannot traverse parent directories.")
+        return paths
 
 
 class LimitsConfig(BaseModel):
@@ -161,6 +175,7 @@ class LimitsConfig(BaseModel):
     implementation_attempts: int = 3
     lightweight_verification_failures: int = 2
     standard_failures: int = 2
+    reproduction_timeout_seconds: float = Field(default=300.0, gt=0)
     review_fix_cycles: int = 2
 
 
@@ -206,4 +221,30 @@ class ProjectConfig(BaseModel):
         models = self.models or DEFAULT_MODELS_CONFIG
         for alias in all_referenced_aliases(self.routing):
             models.resolve(alias)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_verification_overlap(self) -> "ProjectConfig":
+        groups = self.verification or {}
+        for name, group in groups.items():
+            for duplicate in group.supersedes:
+                if duplicate == name or duplicate not in groups:
+                    raise ValueError(
+                        f"Verification group '{name}' supersedes unknown or itself: '{duplicate}'."
+                    )
+
+        def visit(name: str, stack: set[str], done: set[str]) -> None:
+            if name in stack:
+                raise ValueError("Verification supersedes declarations cannot contain a cycle.")
+            if name in done:
+                return
+            stack.add(name)
+            for duplicate in groups[name].supersedes:
+                visit(duplicate, stack, done)
+            stack.remove(name)
+            done.add(name)
+
+        done: set[str] = set()
+        for name in groups:
+            visit(name, set(), done)
         return self

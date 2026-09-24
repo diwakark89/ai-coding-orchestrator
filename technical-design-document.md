@@ -1313,8 +1313,66 @@ verification:
       - pyproject.toml
 
     commands:
-      - pytest
+      - python -m pytest
 ```
+
+Each group may specify a repository-relative `working_directory` (default `.`).
+Detection paths remain relative to the worktree root; commands execute from the
+group's resolved directory inside that worktree. Generated groups for nested projects
+set this field to the directory containing their detected project marker.
+Python pytest commands use the matching component virtualenv from the original
+project (`.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on Unix)
+and execute with the worktree component as the working directory. Legacy bare
+`pytest` commands receive the same resolution. Missing or unusable interpreters
+produce an explicit verification error instead of falling back to `PATH`.
+
+Group selection starts with Git's staged, unstaged, and untracked worktree paths.
+`detect` controls whether a group exists for this checkout; it does not by itself
+make the group run. A changed path selects the most specific configured
+`working_directory` that contains it. A module change selects its module group,
+not an ancestor reactor group. Groups tied at the same directory depth all run
+unless an explicit overlap declaration covers one. Changes across components
+select the union. A root-level file or a
+path outside every configured group is treated as shared and selects every
+applicable group. Empty or unreadable Git change scope also selects every
+applicable group. `scope_paths` adds explicit repository-relative glob mappings
+for shared files when a narrower mapping is known. Explicit mappings also add
+affected groups for component paths. Configured patterns are an assertion of
+ownership; include every affected group when mapping shared code.
+
+Use `supersedes` only when one group performs the *same required checks* as the
+named group. For a Skillify-style root `npm test` that invokes the same Jest
+suite as `front-end`, the `front-end` group may declare
+`supersedes: [root-node]`. If the root group contains additional checks, split
+the Jest command into its own group before declaring overlap. A Maven reactor
+group may declare `supersedes` for module groups only when the reactor command
+actually executes their required tests. A module-only change still runs its
+module group; the reactor can cover it when both groups are selected for a
+shared change or explicit mapping. AgentFlow never infers overlap from
+`npm`, Maven, or command names. Existing configurations remain valid; add
+`supersedes` explicitly to eliminate known duplicate suites.
+Generated Node groups require an actual `scripts.test` entry in their
+`package.json`. For an existing profile whose root package has no test script,
+remove the root `npm test` group; `supersedes` describes real coverage and is
+not a way to hide an invalid command.
+
+Each verification result records the selected groups, path-based reasons,
+suppressed overlaps, rerun groups, cached passes, failed group, and command
+results. After a repair, review fix, or documentation edit, AgentFlow reruns
+the previously failed group first, then every group selected by paths changed
+since the last pass (and any required group not yet run); a pass is retained
+only for a group none of whose inputs changed, so no separate full "final gate"
+pass is needed. Documentation files (`.md`, `.markdown`, `.rst`, `.adoc`) select
+no group and never trigger the shared-file fallback unless a group's
+`scope_paths` claims them explicitly. Agents that edit the worktree are told
+AgentFlow runs verification itself, to run only the narrowest targeted checks,
+and to report environment problems instead of editing test tooling. Missing interpreters, commands, or dependencies block without using a
+coding-agent repair attempt. Timeout-like test failures receive one bounded
+reproduction check; a passing retry is reported as intermittent and blocks
+instead of counting as a successful verification.
+The reproduction command is capped by `limits.reproduction_timeout_seconds`
+(default 300 seconds) and is attempted once for each failing command and
+unchanged worktree state.
 
 AgentFlow must capture:
 

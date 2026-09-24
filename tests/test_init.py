@@ -25,22 +25,51 @@ def test_detect_verification_groups_root_marker(tmp_path: Path):
 
     assert "python" in groups
     assert groups["python"].detect == ["pyproject.toml"]
-    assert groups["python"].commands == ["pytest"]
+    assert groups["python"].working_directory == "."
+    assert groups["python"].commands == ["python -m pytest"]
 
 
 def test_detect_verification_groups_nested_directories(tmp_path: Path):
     """Marker files in subdirectories are detected as groups keyed by directory name."""
     (tmp_path / "front-end").mkdir()
-    (tmp_path / "front-end" / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "front-end" / "package.json").write_text(
+        '{"scripts":{"test":"jest"}}', encoding="utf-8"
+    )
     (tmp_path / "web-service").mkdir()
     (tmp_path / "web-service" / "pom.xml").write_text("<project/>", encoding="utf-8")
 
     groups = detect_verification_groups(tmp_path)
 
     assert groups["front-end"].detect == ["front-end/package.json"]
+    assert groups["front-end"].working_directory == "front-end"
     assert groups["front-end"].commands == ["npm test"]
     assert groups["web-service"].detect == ["web-service/pom.xml"]
+    assert groups["web-service"].working_directory == "web-service"
     assert groups["web-service"].commands == ["mvn test"]
+
+
+def test_init_skips_root_package_without_test_script_but_keeps_frontend(tmp_path: Path):
+    (tmp_path / "package.json").write_text('{"scripts":{"dev":"node dev.js"}}', encoding="utf-8")
+    frontend = tmp_path / "front-end"
+    frontend.mkdir()
+    (frontend / "package.json").write_text('{"scripts":{"test":"jest"}}', encoding="utf-8")
+
+    groups = detect_verification_groups(tmp_path)
+
+    assert list(groups) == ["front-end"]
+    assert groups["front-end"].commands == ["npm test"]
+
+
+def test_detect_verification_groups_nested_python_uses_component_directory(tmp_path: Path):
+    component = tmp_path / "ai-engine"
+    component.mkdir()
+    (component / "pyproject.toml").write_text("", encoding="utf-8")
+
+    groups = detect_verification_groups(tmp_path)
+
+    assert groups["ai-engine"].detect == ["ai-engine/pyproject.toml"]
+    assert groups["ai-engine"].working_directory == "ai-engine"
+    assert groups["ai-engine"].commands == ["python -m pytest"]
 
 
 def test_detect_verification_groups_skips_dependency_directories(tmp_path: Path):
@@ -172,9 +201,7 @@ def test_run_init_raises_when_no_providers_available_or_specified(tmp_path: Path
 def test_run_init_auto_detects_available_providers(tmp_path: Path, monkeypatch):
     """Without --providers, agentflow init only uses CLIs actually found on PATH."""
     (tmp_path / ".git").mkdir()
-    monkeypatch.setattr(
-        "shutil.which", lambda cmd: f"/usr/bin/{cmd}" if cmd == "claude" else None
-    )
+    monkeypatch.setattr("shutil.which", lambda cmd: f"/usr/bin/{cmd}" if cmd == "claude" else None)
 
     result = _app(tmp_path).run_init(project_path=tmp_path)
 

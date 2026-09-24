@@ -156,9 +156,7 @@ class DatabaseManager:
     def get_cli_availability(self, provider: str) -> CliAvailabilityRecord | None:
         """Retrieve the most recently recorded `doctor` check for one provider CLI."""
         with self.connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM cli_availability WHERE provider = ?;", (provider,)
-            )
+            cursor = conn.execute("SELECT * FROM cli_availability WHERE provider = ?;", (provider,))
             row = cursor.fetchone()
             if row is None:
                 return None
