@@ -683,3 +683,23 @@ def test_cli_retire_missing_arguments_exits_nonzero():
 
     assert result.exit_code == 1
     assert "Provide both" in result.output
+
+
+def test_cli_merge_forwards_yes_and_reports_refusal(monkeypatch):
+    """agentflow merge --yes skips confirmation; an unmerged outcome exits nonzero."""
+    from agentflow.workflow.merge import MergeOutcome
+
+    received: dict[str, object] = {}
+
+    async def fake_merge(self, run_id, project_path=None, confirm=None):
+        received.update(run_id=run_id, confirmed=confirm() if confirm else None)
+        return MergeOutcome(merged=run_id == "RUN-OK", reason="conflicts")
+
+    monkeypatch.setattr(Application, "merge_completed_run", fake_merge)
+
+    ok = runner.invoke(app, ["merge", "RUN-OK", "--yes"])
+    assert ok.exit_code == 0
+    assert received == {"run_id": "RUN-OK", "confirmed": True}
+
+    refused = runner.invoke(app, ["merge", "RUN-NO", "--yes"])
+    assert refused.exit_code == 1

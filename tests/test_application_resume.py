@@ -228,7 +228,7 @@ async def test_resume_during_planning_reuses_persisted_cli_session(
     outcome = await app_instance.run_resume(
         "RUN-PLAN",
         project_path=git_repo,
-        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -272,7 +272,7 @@ async def test_resume_during_planning_reconstructs_context_when_session_is_unava
     outcome = await app_instance.run_resume(
         "RUN-PLAN-FALLBACK",
         project_path=git_repo,
-        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -303,7 +303,7 @@ async def test_resume_with_no_worktree_yet_implements_from_persisted_plan(
     outcome = await app_instance.run_resume(
         planning_outcome.run_id,
         project_path=git_repo,
-        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -334,7 +334,7 @@ async def test_resume_falls_back_to_db_task_when_task_md_is_missing(
     outcome = await app_instance.run_resume(
         planning_outcome.run_id,
         project_path=git_repo,
-        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -366,7 +366,9 @@ async def test_resume_with_empty_worktree_recreates_and_implements(
     )
 
     outcome = await app_instance.run_resume(
-        run_id, project_path=git_repo, final_approval_prompt=lambda: FinalApprovalDecision.APPROVE
+        run_id,
+        project_path=git_repo,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -401,7 +403,9 @@ async def test_resume_with_existing_changes_skips_reimplementation(
     app_instance.db_manager.update_run_status(run_id, RunStatus.RUNNING.value)
 
     outcome = await app_instance.run_resume(
-        run_id, project_path=git_repo, final_approval_prompt=lambda: FinalApprovalDecision.APPROVE
+        run_id,
+        project_path=git_repo,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -441,7 +445,9 @@ async def test_resume_clears_stale_worktree_lock_and_continues(
     app_instance.db_manager.update_run_status(run_id, RunStatus.RUNNING.value)
 
     outcome = await app_instance.run_resume(
-        run_id, project_path=git_repo, final_approval_prompt=lambda: FinalApprovalDecision.APPROVE
+        run_id,
+        project_path=git_repo,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -556,7 +562,7 @@ async def test_different_projects_can_create_isolated_worktrees_concurrently(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_removes_terminal_unlocked_worktree_and_logs(git_repo: Path, tmp_path: Path):
+async def test_cleanup_removes_merged_terminal_worktree_and_logs(git_repo: Path, tmp_path: Path):
     """Cleanup removes only a terminal run's disposable worktree, branch, and verification logs."""
     _prepare_repo(git_repo)
     registry, *_ = make_registry()
@@ -574,6 +580,7 @@ async def test_cleanup_removes_terminal_unlocked_worktree_and_logs(git_repo: Pat
     log_dir = git_repo / ".ai-orchestrator" / "runs" / run_id / "verification"
     log_dir.mkdir(parents=True)
     (log_dir / "stdout.log").write_text("ok\n", encoding="utf-8")
+    app_instance.db_manager.record_decision("d-merged", run_id, "merged_commit", "abc123")
 
     report = await app_instance.run_cleanup(project_path=git_repo)
 
@@ -582,6 +589,33 @@ async def test_cleanup_removes_terminal_unlocked_worktree_and_logs(git_repo: Pat
     assert not handle.path.exists()
     assert not await manager.branch_exists(git_repo, handle.branch_name)
     assert not log_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_completed_worktree_with_unmerged_changes(
+    git_repo: Path, tmp_path: Path
+):
+    """Approved-but-unmerged work is the only copy of the change; cleanup must not delete it."""
+    _prepare_repo(git_repo)
+    registry, *_ = make_registry()
+    app_instance = make_app(registry, tmp_path)
+    app_instance.initialize()
+    ctx = discover_project(explicit_path=git_repo)
+    app_instance.db_manager.upsert_project(ctx.project_id, ctx.project_name, str(git_repo))
+    run_id = "RUN-UNMERGED"
+    app_instance.db_manager.create_run(run_id, ctx.project_id, "Add a feature")
+    app_instance.db_manager.update_run_state(run_id, WorkflowState.COMPLETED.value, "test setup")
+
+    manager = WorktreeManager(app_instance.config.worktrees.root, executor=app_instance.executor)
+    handle = await manager.create(ctx.project_name, run_id, git_repo)
+    (handle.path / "feature.py").write_text("value = 1\n", encoding="utf-8")
+
+    report = await app_instance.run_cleanup(project_path=git_repo)
+
+    assert report.unmerged_kept == [run_id]
+    assert report.worktrees_removed == []
+    assert (handle.path / "feature.py").exists()
+    assert await manager.branch_exists(git_repo, handle.branch_name)
 
 
 @pytest.mark.asyncio
@@ -662,7 +696,9 @@ async def test_resume_blocked_run_retries_from_recovered_stage(
     app_instance.db_manager.update_run_status(run_id, RunStatus.BLOCKED.value)
 
     outcome = await app_instance.run_resume(
-        run_id, project_path=git_repo, final_approval_prompt=lambda: FinalApprovalDecision.APPROVE
+        run_id,
+        project_path=git_repo,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -740,7 +776,7 @@ async def test_resume_blocked_run_honors_role_override_for_recovered_stage(
         run_id,
         project_path=git_repo,
         role_override=role_override,
-        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+        final_approval_prompt=lambda: FinalApprovalDecision.KEEP_WORKTREE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED

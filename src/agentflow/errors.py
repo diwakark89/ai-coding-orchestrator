@@ -85,6 +85,10 @@ class ResumeError(WorkflowError):
     """Raised when a run cannot be safely resumed (terminal state, missing artifacts, etc.)."""
 
 
+class MergeError(WorkflowError):
+    """Raised when `agentflow merge` is asked to merge a run that is not eligible."""
+
+
 class RunLockedError(WorkflowError):
     """Raised when a run is already controlled by another live process."""
 

@@ -1834,10 +1834,20 @@ Implementation occurs in isolated worktrees.
 
 AgentFlow must not:
 
-- force-push;
-- merge automatically;
+- force-push, or push at all;
+- merge without the user choosing `merge` at the final approval gate (or running
+  `agentflow merge <run-id>`);
 - delete branches without confirmation;
 - modify the main working tree during an agent run.
+
+An approved merge records the branch the primary checkout was on when the run's
+worktree was created, commits the worktree's changes once (hooks run normally), and
+cherry-picks that single commit onto the primary checkout. It proceeds only when the
+checkout is on that branch with no tracked changes and no merge/rebase/cherry-pick in
+progress; a conflicting pick is aborted so the checkout is left exactly as it was, and
+the worktree is kept for `agentflow merge`. After a successful merge the worktree and
+`agentflow/<run-id>` branch are removed. `agentflow cleanup` never removes a completed
+run's worktree that still holds unmerged changes.
 
 ---
 

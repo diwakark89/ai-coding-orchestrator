@@ -1892,12 +1892,15 @@ FAILED
 At minimum:
 
 ```text
-Approve completion
-Keep worktree for manual inspection
-Cancel
+merge          squash the run into one commit on the branch it started from
+diff           show the full diff, then ask again
+keep_worktree  finish without merging (merge later with `agentflow merge <run-id>`)
+cancel
 ```
 
-Do not automatically merge to the user's branch.
+Merge only on the explicit `merge` choice, only when the main checkout is on the
+recorded base branch with no tracked changes, and abort cleanly on conflicts. `merge`
+is not offered when those preconditions fail.
 
 ---
 
@@ -1906,7 +1909,7 @@ Do not automatically merge to the user's branch.
 V1 must not:
 
 - push automatically;
-- merge automatically;
+- merge without explicit approval at the final gate;
 - create production deployments.
 
 Those can be future explicit features.

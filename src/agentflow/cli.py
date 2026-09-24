@@ -610,7 +610,7 @@ def complete_cmd(
 ) -> None:
     """Run the full pipeline: plan, route, implement, verify/repair, review, document, approve.
 
-    V1 never auto-pushes, auto-merges, or deploys -- completion always requires human approval.
+    Merges only when you choose `merge` at the final approval prompt; never pushes or deploys.
     """
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project
@@ -733,6 +733,51 @@ def resume_cmd(
     detail = f": {outcome.blocker_reason}" if outcome.blocker_reason else ""
     app_instance.ui.print_error(f"Run {run_id} ended in state {outcome.state.value}{detail}")
     raise typer.Exit(code=1)
+
+
+@app.command(
+    name="merge",
+    epilog="""Examples:
+  agentflow merge RUN-AB12CD34
+  agentflow merge RUN-AB12CD34 --yes""",
+)
+def merge_cmd(
+    ctx: typer.Context,
+    run_id: Annotated[str, typer.Argument(help="Completed run whose changes to merge.")],
+    project: Annotated[
+        Path | None,
+        typer.Option(
+            "--project",
+            "-C",
+            help="Target project directory path (overrides auto-discovery).",
+        ),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Merge without the confirmation prompt."),
+    ] = False,
+) -> None:
+    """Squash a completed run into one commit on the branch it started from.
+
+    Your checkout must be on that branch with no uncommitted changes to tracked files.
+    On conflicts nothing is changed and the worktree is kept. Never pushes.
+    """
+    global_project = ctx.obj.get("project") if ctx.obj else None
+    target_project = project or global_project
+    app_instance = Application()
+    try:
+        outcome = asyncio.run(
+            app_instance.merge_completed_run(
+                run_id,
+                project_path=target_project,
+                confirm=(lambda: True) if yes else None,
+            )
+        )
+    except AgentFlowError as e:
+        app_instance.ui.print_error(str(e))
+        raise typer.Exit(code=1) from e
+    if not outcome.merged:
+        raise typer.Exit(code=1)
 
 
 @app.command(

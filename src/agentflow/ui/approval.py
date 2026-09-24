@@ -37,21 +37,42 @@ def ask_plan_feedback(console_instance: Console | None = None) -> str:
 class FinalApprovalDecision(str, Enum):
     """User decision when presented with a run's final summary (Phase 9)."""
 
-    APPROVE = "approve"
+    MERGE = "merge"
+    DIFF = "diff"
     KEEP_WORKTREE = "keep_worktree"
     CANCEL = "cancel"
 
 
-def ask_final_approval(console_instance: Console | None = None) -> FinalApprovalDecision:
-    """Prompt the user to approve completion, keep the worktree for inspection, or cancel.
+def ask_final_approval(
+    console_instance: Console | None = None, merge_available: bool = True
+) -> FinalApprovalDecision:
+    """Prompt the user to merge, view the diff, keep the worktree for inspection, or cancel.
 
-    V1 never auto-pushes, auto-merges, or auto-deploys -- a human always decides here.
+    Merging happens only on this explicit choice; AgentFlow never pushes or deploys.
     """
     c = console_instance or console
+    choices = [
+        *(["merge"] if merge_available else []),
+        "diff",
+        "keep_worktree",
+        "cancel",
+    ]
     choice = Prompt.ask(
-        "\n[bold]Approve completion?[/bold] (approve / keep_worktree / cancel)",
-        choices=["approve", "keep_worktree", "cancel"],
-        default="approve",
+        f"\n[bold]Approve completion?[/bold] ({' / '.join(choices)})",
+        choices=choices,
+        default=choices[0] if merge_available else "keep_worktree",
         console=c,
     )
     return FinalApprovalDecision(choice)
+
+
+def ask_commit_subject(default: str, console_instance: Console | None = None) -> str:
+    """Let the user confirm or edit the commit subject for a merge."""
+    c = console_instance or console
+    return Prompt.ask("Commit subject", default=default, console=c).strip() or default
+
+
+def confirm_merge(console_instance: Console | None = None) -> bool:
+    """Confirmation for `agentflow merge`."""
+    c = console_instance or console
+    return Prompt.ask("Merge now?", choices=["y", "n"], default="y", console=c) == "y"

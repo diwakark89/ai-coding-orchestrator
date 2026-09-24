@@ -185,7 +185,7 @@ async def test_full_pipeline_reaches_completed(
     outcome = await app_instance.run_pipeline(
         "Add a health check endpoint",
         project_path=git_repo,
-        final_approval_prompt=lambda: FinalApprovalDecision.APPROVE,
+        final_approval_prompt=lambda: FinalApprovalDecision.MERGE,
     )
 
     assert outcome.state == WorkflowState.COMPLETED
@@ -205,7 +205,40 @@ async def test_full_pipeline_reaches_completed(
     assert run.status == "COMPLETED"
 
     decisions = app_instance.db_manager.list_decisions(run_id)
-    assert any(d.question == "final_approval" and d.answer == "approve" for d in decisions)
+    assert any(d.question == "final_approval" and d.answer == "merge" for d in decisions)
+    merged = [d.answer for d in decisions if d.question == "merged_commit"]
+    assert len(merged) == 1
+
+    # One squashed commit on the branch the run started from, with every changed file.
+    head = subprocess.run(
+        ["git", "log", "-1", "--format=%H%n%s%n%b"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert head.startswith(merged[0])
+    assert f"AgentFlow run {run_id}" in head
+    committed = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert sorted(committed) == sorted(outcome.final_summary.changed_files)
+    implementation = outcome.implementation_outcome.implementation
+    assert implementation is not None and implementation.worktree is not None
+    assert implementation.worktree.base_branch is not None
+    assert not implementation.worktree.path.exists()
+    branches = subprocess.run(
+        ["git", "branch", "--list", f"agentflow/{run_id}"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert branches.strip() == ""
 
     assert claude.calls == 1
     assert codex.calls == 1
@@ -238,3 +271,40 @@ async def test_pipeline_cancelled_at_final_approval(
     assert run is not None
     assert run.state == "CANCELLED"
     assert run.status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_final_gate_shows_diff_then_merges(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Choosing `diff` shows the worktree diff and re-prompts; `merge` then lands the run."""
+    monkeypatch.setattr(
+        planning_module, "ask_plan_approval", lambda console_instance=None: ApprovalDecision.APPROVE
+    )
+    _commit_file(git_repo, "check_ok.py", "import sys\nsys.exit(0)\n")
+    _write_routing_yaml(git_repo)
+    registry, *_ = make_registry()
+    app_instance = make_app(registry, tmp_path)
+    shown: list[str] = []
+
+    async def fake_show_diff(worktree_path: Path, diff_text: str) -> None:
+        shown.append(diff_text)
+
+    monkeypatch.setattr(app_instance, "_show_worktree_diff", fake_show_diff)
+    choices = iter([FinalApprovalDecision.DIFF, FinalApprovalDecision.MERGE])
+
+    outcome = await app_instance.run_pipeline(
+        "Add a health check endpoint",
+        project_path=git_repo,
+        final_approval_prompt=lambda: next(choices),
+    )
+
+    assert outcome.state == WorkflowState.COMPLETED
+    assert len(shown) == 1 and shown[0].strip()
+    run_id = outcome.implementation_outcome.planning_outcome.run_id
+    answers = [
+        d.answer
+        for d in app_instance.db_manager.list_decisions(run_id)
+        if d.question in ("final_approval", "merged_commit")
+    ]
+    assert answers[0] == "merge" and len(answers) == 2

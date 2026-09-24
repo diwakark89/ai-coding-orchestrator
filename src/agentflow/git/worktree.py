@@ -1,8 +1,9 @@
 """Git worktree manager: isolated, disposable workspaces for AI-driven implementation.
 
-The user's primary working tree is never touched. Every implementation run gets its own
+Agents never touch the user's primary working tree. Every implementation run gets its own
 worktree under ~/.agentflow/worktrees/<project-name>/<run-id>/ on a dedicated branch
 agentflow/<run-id>, created via plain `git worktree` / `git diff` — never `shell=True`.
+Only an explicitly approved merge applies a run's single commit to the primary checkout.
 """
 
 import shutil
@@ -15,11 +16,27 @@ from agentflow.process.executor import ProcessExecutor
 
 @dataclass
 class WorktreeHandle:
-    """A created worktree: its filesystem path, branch, and originating repository."""
+    """A created worktree: its filesystem path, branch, and originating repository.
+
+    base_branch/base_commit record what the primary checkout had at creation, so an
+    approved run can later be merged back into the branch it started from.
+    """
 
     path: Path
     branch_name: str
     repository_path: Path
+    base_branch: str | None = None
+    base_commit: str | None = None
+
+
+@dataclass
+class CherryPickResult:
+    """Outcome of applying a run's commit to the primary checkout."""
+
+    success: bool
+    commit_sha: str | None = None
+    conflicts: list[str] = field(default_factory=list)
+    error: str = ""
 
 
 @dataclass
@@ -70,6 +87,9 @@ class WorktreeManager:
         if worktree_path.exists():
             raise WorktreeError(f"Worktree path already exists: {worktree_path}")
 
+        base_branch = await self.current_branch(repository_path)
+        base_commit = await self._rev_parse(repository_path, "HEAD")
+
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         result = await self.executor.run(
             ["git", "worktree", "add", str(worktree_path), "-b", branch_name],
@@ -83,7 +103,93 @@ class WorktreeManager:
             )
 
         return WorktreeHandle(
-            path=worktree_path, branch_name=branch_name, repository_path=Path(repository_path)
+            path=worktree_path,
+            branch_name=branch_name,
+            repository_path=Path(repository_path),
+            base_branch=base_branch,
+            base_commit=base_commit,
+        )
+
+    async def _rev_parse(self, cwd: Path, ref: str) -> str | None:
+        result = await self.executor.run(["git", "rev-parse", "-q", "--verify", ref], cwd=cwd)
+        if result.exit_code != 0:
+            return None
+        return result.stdout.strip() or None
+
+    async def current_branch(self, repository_path: Path) -> str | None:
+        """The checked-out branch's short name, or None when HEAD is detached."""
+        result = await self.executor.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repository_path
+        )
+        if result.exit_code != 0:
+            return None
+        return result.stdout.strip() or None
+
+    async def unsafe_checkout_reason(self, repository_path: Path) -> str | None:
+        """Why the primary checkout must not receive a merge now, or None if it is safe.
+
+        Untracked files are allowed: Git itself refuses a cherry-pick that would
+        overwrite one, without modifying anything.
+        """
+        for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD", "REVERT_HEAD"):
+            if await self._rev_parse(repository_path, marker):
+                return f"a {marker.split('_')[0].lower()} is in progress"
+        status = await self.executor.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=repository_path
+        )
+        if status.exit_code != 0:
+            return f"git status failed: {status.stderr.strip()}"
+        if status.stdout.strip():
+            return "it has uncommitted changes to tracked files"
+        return None
+
+    async def commits_since(self, worktree_path: Path, base_commit: str) -> int:
+        """Number of commits on the worktree's branch after base_commit."""
+        result = await self.executor.run(
+            ["git", "rev-list", "--count", f"{base_commit}..HEAD"], cwd=worktree_path
+        )
+        if result.exit_code != 0:
+            raise WorktreeError(f"Could not inspect worktree history: {result.stderr.strip()}")
+        return int(result.stdout.strip() or "0")
+
+    async def commit(
+        self, worktree_path: Path, subject: str, body: str, amend: bool = False
+    ) -> str:
+        """Commit everything staged in a run's worktree; hooks run normally. Returns the SHA.
+
+        amend folds new staged changes into a run commit left by an earlier merge attempt,
+        so a run always lands as exactly one commit.
+        """
+        args = ["git", "commit", *(["--amend"] if amend else []), "-m", subject, "-m", body]
+        result = await self.executor.run(args, cwd=worktree_path)
+        if result.exit_code != 0:
+            raise WorktreeError(
+                "Commit in worktree failed: "
+                + (result.stderr.strip() or result.stdout.strip())[-2000:]
+            )
+        sha = await self._rev_parse(worktree_path, "HEAD")
+        if sha is None:
+            raise WorktreeError("Commit in worktree succeeded but HEAD could not be resolved.")
+        return sha
+
+    async def cherry_pick(self, repository_path: Path, commit_sha: str) -> CherryPickResult:
+        """Apply one commit onto the primary checkout; on failure, restore it exactly."""
+        result = await self.executor.run(["git", "cherry-pick", commit_sha], cwd=repository_path)
+        if result.exit_code == 0:
+            return CherryPickResult(
+                success=True, commit_sha=await self._rev_parse(repository_path, "HEAD")
+            )
+        conflicts_result = await self.executor.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"], cwd=repository_path
+        )
+        conflicts = [line.strip() for line in conflicts_result.stdout.splitlines() if line.strip()]
+        # A refused pick (e.g. an untracked file would be overwritten) leaves no state to abort.
+        if await self._rev_parse(repository_path, "CHERRY_PICK_HEAD"):
+            await self.executor.run(["git", "cherry-pick", "--abort"], cwd=repository_path)
+        return CherryPickResult(
+            success=False,
+            conflicts=conflicts,
+            error=(result.stderr.strip() or result.stdout.strip())[-2000:],
         )
 
     async def _cleanup_failed_creation(self, repository_path: Path, worktree_path: Path) -> None:
@@ -108,10 +214,10 @@ class WorktreeManager:
     async def delete_branch(self, repository_path: Path, branch_name: str) -> None:
         """Force-delete a run's dedicated branch after its worktree has been removed.
 
-        Safe by construction: implementation/repair/review/documentation stages only ever
-        `git add -A` inside the worktree to capture a diff (never `git commit`), so an
-        agentflow/<run-id> branch never carries commits that could be lost. Best-effort: a
-        missing branch (e.g. already deleted) is not treated as an error.
+        Workflow stages never commit; only an approved merge commits on the branch, and it
+        deletes the branch after its commit was applied to the base branch. Callers must not
+        delete the branch of a completed-but-unmerged run. Best-effort: a missing branch
+        (e.g. already deleted) is not treated as an error.
         """
         await self.executor.run(["git", "branch", "-D", branch_name], cwd=repository_path)
 

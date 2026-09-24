@@ -22,6 +22,7 @@ from agentflow.config.retirement import apply_retirements
 from agentflow.errors import (
     ConfigurationError,
     InitError,
+    MergeError,
     ProjectNotFoundError,
     ResumeError,
     WorktreeError,
@@ -39,11 +40,25 @@ from agentflow.routing.decision import RoutingDecision
 from agentflow.routing.engine import route
 from agentflow.routing.rules import DEFAULT_MODELS_CONFIG, DEFAULT_ROUTING_RULES, RoleOverride
 from agentflow.task.profile import Stage, TaskProfile
-from agentflow.ui.approval import FinalApprovalDecision, ask_final_approval
+from agentflow.ui.approval import (
+    FinalApprovalDecision,
+    ask_commit_subject,
+    ask_final_approval,
+    confirm_merge,
+)
 from agentflow.ui.console import CHECKMARK, CROSSMARK, WARNINGMARK, ConsoleUI
 from agentflow.workflow.completion import FinalSummary, write_final_summary_artifact
 from agentflow.workflow.documentation import DocumentationOutcome, DocumentationWorkflow
 from agentflow.workflow.implementation import ImplementationOutcome, ImplementationWorkflow
+from agentflow.workflow.merge import (
+    MergeOutcome,
+    MergePreflight,
+    commit_body,
+    commit_subject,
+    latest_decision,
+    merge_run,
+    preflight_merge,
+)
 from agentflow.workflow.planning import PlanningOutcome, PlanningWorkflow
 from agentflow.workflow.repair import RepairOutcome, RepairWorkflow
 from agentflow.workflow.review import ReviewOutcome, ReviewReport, ReviewWorkflow
@@ -159,6 +174,7 @@ class CleanupReport:
     locks_cleared: list[str] = field(default_factory=list)
     logs_cleared: list[str] = field(default_factory=list)
     skipped_active: list[str] = field(default_factory=list)
+    unmerged_kept: list[str] = field(default_factory=list)
 
 
 class Application:
@@ -938,7 +954,7 @@ class Application:
     ) -> PipelineOutcome:
         """Plan, route, implement, verify/repair, review, document, then await human approval.
 
-        V1 never auto-pushes, auto-merges, or deploys -- only a human decides completion.
+        Merges only when the human chooses `merge` at the final gate; never pushes or deploys.
         """
         impl_outcome = await self._plan_route_implement_and_verify(
             task_description, project_path=project_path, role_override=role_override
@@ -1122,8 +1138,26 @@ class Application:
         summary_path = write_final_summary_artifact(ctx.root_path, run_id, summary)
         self.render_final_summary(summary)
 
-        prompt = final_approval_prompt or ask_final_approval
-        approval = prompt()
+        repository_path = ctx.root_path
+        preflight = await preflight_merge(
+            self.db_manager,
+            worktree_manager,
+            run_id,
+            repository_path,
+            worktree_path,
+            commit_subject(plan_markdown, task_description),
+        )
+        self._render_merge_preflight(preflight)
+
+        while True:
+            approval = (
+                final_approval_prompt()
+                if final_approval_prompt is not None
+                else ask_final_approval(self.ui.console, merge_available=preflight.ok)
+            )
+            if approval != FinalApprovalDecision.DIFF:
+                break
+            await self._show_worktree_diff(worktree_path, final_diff.diff_text)
         self.db_manager.record_decision(str(uuid.uuid4()), run_id, "final_approval", approval.value)
 
         if approval == FinalApprovalDecision.CANCEL:
@@ -1140,11 +1174,30 @@ class Application:
                 final_summary_path=summary_path,
             )
 
-        reason = (
-            "User approved completion"
-            if approval == FinalApprovalDecision.APPROVE
-            else "User approved completion; keeping worktree for manual inspection"
-        )
+        if approval == FinalApprovalDecision.MERGE:
+            subject = (
+                preflight.subject
+                if final_approval_prompt is not None
+                else ask_commit_subject(preflight.subject, self.ui.console)
+            )
+            merge = await merge_run(
+                self.db_manager,
+                worktree_manager,
+                run_id,
+                repository_path,
+                worktree_path,
+                subject,
+                commit_body(run_id, task_description),
+            )
+            self._render_merge_outcome(run_id, merge)
+            reason = (
+                f"User approved completion; merged into {merge.base_branch} as "
+                f"{(merge.commit_sha or '')[:12]}"
+                if merge.merged
+                else f"User approved completion; merge skipped: {merge.reason}"
+            )
+        else:
+            reason = "User approved completion; keeping worktree for manual inspection"
         transition_run_state(self.db_manager, run_id, WorkflowState.COMPLETED, reason)
         self.db_manager.update_run_status(run_id, RunStatus.COMPLETED.value)
 
@@ -1161,6 +1214,35 @@ class Application:
         """Render the final run summary to the console."""
         self.ui.print_header("Final Summary")
         self.ui.console.print(summary.render_markdown())
+
+    def _render_merge_preflight(self, preflight: MergePreflight) -> None:
+        if preflight.ok:
+            self.ui.print_info(
+                f"Merge will squash this run into one commit on {preflight.base_branch!r}: "
+                f"{preflight.subject}"
+            )
+        else:
+            self.ui.print_warning(f"Merge unavailable: {preflight.reason}")
+
+    def _render_merge_outcome(self, run_id: str, merge: MergeOutcome) -> None:
+        if merge.merged:
+            self.ui.print_success(
+                f"Merged into {merge.base_branch!r} as {(merge.commit_sha or '')[:12]}. "
+                "Nothing was pushed; run `git push` when ready."
+            )
+            if merge.cleanup_warning:
+                self.ui.print_warning(merge.cleanup_warning)
+        else:
+            self.ui.print_warning(
+                f"Not merged: {merge.reason}. The worktree was kept; "
+                f"fix this and run `agentflow merge {run_id}`."
+            )
+
+    async def _show_worktree_diff(self, worktree_path: Path, diff_text: str) -> None:
+        stat = await self.executor.run(["git", "diff", "--cached", "--stat"], cwd=worktree_path)
+        self.ui.console.print(stat.stdout, markup=False, highlight=False)
+        with self.ui.console.pager():
+            self.ui.console.print(diff_text, markup=False, highlight=False)
 
     def _locks_root(self) -> Path:
         """Global directory holding run-level lock files, alongside the shared database."""
@@ -1291,6 +1373,82 @@ class Application:
             f"Worktree {worktree_path} is actively locked by a live process (pid={pid}); "
             "cannot resume until it finishes or is stopped."
         )
+
+    async def merge_completed_run(
+        self,
+        run_id: str,
+        project_path: Path | None = None,
+        confirm: Callable[[], bool] | None = None,
+    ) -> MergeOutcome:
+        """Merge an approved-but-unmerged run into the branch it started from.
+
+        For runs finished with `keep_worktree`, or whose merge at the final gate was skipped
+        (checkout on another branch, uncommitted changes, conflicts). Same safety rules as
+        the final gate; `confirm` is the explicit human confirmation (None = interactive).
+        """
+        self.initialize()
+        run = self.db_manager.get_run(run_id)
+        if run is None:
+            raise MergeError(f"Run '{run_id}' not found.")
+        if WorkflowState(run.state) != WorkflowState.COMPLETED:
+            raise MergeError(
+                f"Run '{run_id}' is {run.state}; only completed runs can be merged. "
+                f"Finish it first with `agentflow resume {run_id}`."
+            )
+        project_record = self.db_manager.get_project(run.project_id)
+        if project_record is None:
+            raise MergeError(f"Project for run '{run_id}' not found in the local database.")
+        ctx = discover_project(explicit_path=project_path or Path(project_record.repository_path))
+        run_dir = ctx.root_path / ".ai-orchestrator" / "runs" / run_id
+        task_description = self._read_task_artifact(run_dir, run.task)
+        plan_markdown = self._read_artifact_text(run_dir / "approved-plan.md") or ""
+
+        manager = WorktreeManager(self.config.worktrees.root, executor=self.executor)
+        worktree_path = manager.worktree_path_for(ctx.project_name, run_id)
+        preflight = await preflight_merge(
+            self.db_manager,
+            manager,
+            run_id,
+            ctx.root_path,
+            worktree_path,
+            commit_subject(plan_markdown, task_description),
+        )
+        self._render_merge_preflight(preflight)
+        if not preflight.ok:
+            return MergeOutcome(
+                merged=False, base_branch=preflight.base_branch, reason=preflight.reason
+            )
+        if not (confirm() if confirm is not None else confirm_merge(self.ui.console)):
+            return MergeOutcome(
+                merged=False, base_branch=preflight.base_branch, reason="cancelled by user"
+            )
+        subject = (
+            preflight.subject
+            if confirm is not None
+            else ask_commit_subject(preflight.subject, self.ui.console)
+        )
+
+        run_lock = RunLock(run_id, self._locks_root())
+        run_lock.acquire()
+        writer_lock = WorktreeLock(worktree_path)
+        try:
+            writer_lock.acquire(owner="agentflow-merge")
+            try:
+                outcome = await merge_run(
+                    self.db_manager,
+                    manager,
+                    run_id,
+                    ctx.root_path,
+                    worktree_path,
+                    subject,
+                    commit_body(run_id, task_description),
+                )
+            finally:
+                writer_lock.release()
+        finally:
+            run_lock.release()
+        self._render_merge_outcome(run_id, outcome)
+        return outcome
 
     async def run_resume(
         self,
@@ -1714,6 +1872,11 @@ class Application:
                     if state not in _TERMINAL_STATES:
                         report.skipped_active.append(run.id)
                         continue
+                    if state == WorkflowState.COMPLETED and await self._has_unmerged_work(
+                        worktree_manager, run.id, worktree_path
+                    ):
+                        report.unmerged_kept.append(run.id)
+                        continue
 
                     handle = WorktreeHandle(
                         path=worktree_path,
@@ -1740,6 +1903,28 @@ class Application:
 
         return report
 
+    async def _has_unmerged_work(
+        self, worktree_manager: WorktreeManager, run_id: str, worktree_path: Path
+    ) -> bool:
+        """True if a completed run's worktree still holds changes that were never merged.
+
+        Errs toward keeping: any failure to inspect the worktree counts as unmerged work.
+        """
+        if latest_decision(self.db_manager, run_id, "merged_commit"):
+            return False
+        status = await self.executor.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree_path
+        )
+        if status.exit_code != 0 or status.stdout.strip():
+            return True
+        base_commit = latest_decision(self.db_manager, run_id, "base_commit")
+        if base_commit is None:
+            return False
+        try:
+            return await worktree_manager.commits_since(worktree_path, base_commit) > 0
+        except WorktreeError:
+            return True
+
     def render_cleanup_report(self, report: CleanupReport) -> None:
         """Render a summary of what `agentflow cleanup` removed."""
         self.ui.print_header("AgentFlow Cleanup")
@@ -1750,4 +1935,9 @@ class Application:
             self.ui.print_info(
                 f"Skipped (still active): {len(report.skipped_active)} -- "
                 f"{', '.join(report.skipped_active)}"
+            )
+        for run_id in report.unmerged_kept:
+            self.ui.print_warning(
+                f"Kept {run_id}: approved changes were never merged. "
+                f"Run `agentflow merge {run_id}`, or delete its worktree manually to discard."
             )

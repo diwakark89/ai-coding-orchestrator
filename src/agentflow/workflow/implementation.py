@@ -102,6 +102,16 @@ class ImplementationWorkflow:
                 run_id=run_id, state=WorkflowState.BLOCKED, blocker_reason=str(e)
             )
 
+        # Remembered so an approved run can be merged back where it started (latest wins).
+        if handle.base_branch:
+            self.db_manager.record_decision(
+                str(uuid.uuid4()), run_id, "base_branch", handle.base_branch
+            )
+        if handle.base_commit:
+            self.db_manager.record_decision(
+                str(uuid.uuid4()), run_id, "base_commit", handle.base_commit
+            )
+
         transition_run_state(
             self.db_manager,
             run_id,

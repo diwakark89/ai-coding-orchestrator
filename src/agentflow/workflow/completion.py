@@ -2,8 +2,8 @@
 
 A complete run must reach READY_FOR_APPROVAL only once plan approval, implementation,
 deterministic verification, mandatory review resolution, and required documentation have all
-succeeded. From there, only a human decides completion -- V1 never auto-pushes, auto-merges,
-or deploys.
+succeeded. From there, only a human decides completion: merging happens only on an explicit
+`merge` choice, and AgentFlow never pushes or deploys.
 """
 
 from dataclasses import dataclass, field
