@@ -76,6 +76,10 @@ class CodexAdapter(BaseAgentAdapter):
         model = self._resolve_model(request.model)
         args.extend(["--model", model])
 
+        # Let the sandbox write the run's temp dir, so tools don't fall back to the worktree.
+        if request.scratch_directory is not None:
+            args.extend(["--add-dir", str(request.scratch_directory)])
+
         if request.extra_args:
             args.extend(request.extra_args)
 

@@ -1,5 +1,6 @@
 """Application container and workflow orchestration core."""
 
+import contextlib
 import platform
 import shutil
 import sys
@@ -28,11 +29,12 @@ from agentflow.errors import (
     WorktreeError,
 )
 from agentflow.git.lock import WorktreeLock
-from agentflow.git.worktree import WorktreeHandle, WorktreeManager
+from agentflow.git.worktree import WorktreeHandle, WorktreeManager, scratch_dir_for
 from agentflow.observability.metrics import StatisticsReport, StatisticsService
 from agentflow.persistence.database import DatabaseManager
 from agentflow.persistence.models import RunStatus
 from agentflow.process.executor import ProcessExecutor
+from agentflow.process.removal import remove_tree
 from agentflow.project.context import ProjectContext
 from agentflow.project.discovery import ROUTING_CONFIG_RELATIVE_PATH, discover_project
 from agentflow.project.init import build_starter_config
@@ -175,6 +177,9 @@ class CleanupReport:
     logs_cleared: list[str] = field(default_factory=list)
     skipped_active: list[str] = field(default_factory=list)
     unmerged_kept: list[str] = field(default_factory=list)
+    temp_removed: list[str] = field(default_factory=list)
+    locked_paths: list[str] = field(default_factory=list)
+    needs_admin: bool = False
 
 
 class Application:
@@ -1883,25 +1888,44 @@ class Application:
                         branch_name=worktree_manager.branch_name_for(run.id),
                         repository_path=repository_path,
                     )
-                    try:
+                    # A failed `git worktree remove` usually still unregisters the worktree;
+                    # whatever it leaves behind (e.g. sandbox-locked temp dirs) goes below.
+                    with contextlib.suppress(WorktreeError):
                         await worktree_manager.remove(handle, force=True)
-                        await worktree_manager.delete_branch(repository_path, handle.branch_name)
+                    removed = await self._remove_managed(worktree_path, repository_path, report)
+                    if removed:
+                        await worktree_manager.prune(repository_path)
                         report.worktrees_removed.append(run.id)
-                    except WorktreeError:
-                        report.skipped_active.append(run.id)
-                        continue
+                    await worktree_manager.delete_branch(repository_path, handle.branch_name)
                 elif state not in _TERMINAL_STATES:
                     continue
 
                 if state in _TERMINAL_STATES:
+                    scratch = scratch_dir_for(worktree_path)
+                    if scratch.exists() and await self._remove_managed(
+                        scratch, repository_path, report
+                    ):
+                        report.temp_removed.append(run.id)
                     verification_log_dir = (
                         repository_path / ".ai-orchestrator" / "runs" / run.id / "verification"
                     )
-                    if verification_log_dir.exists():
-                        shutil.rmtree(verification_log_dir, ignore_errors=True)
+                    if verification_log_dir.exists() and await self._remove_managed(
+                        verification_log_dir, repository_path, report
+                    ):
                         report.logs_cleared.append(run.id)
 
         return report
+
+    async def _remove_managed(
+        self, path: Path, repository_path: Path, report: CleanupReport
+    ) -> bool:
+        """Remove an AgentFlow-owned folder; record it as locked if it resists deletion."""
+        allowed = [self.config.worktrees.root, repository_path / ".ai-orchestrator" / "runs"]
+        result = await remove_tree(path, allowed, self.executor)
+        if not result.removed:
+            report.locked_paths.append(str(path))
+            report.needs_admin = report.needs_admin or result.needs_admin
+        return result.removed
 
     async def _has_unmerged_work(
         self, worktree_manager: WorktreeManager, run_id: str, worktree_path: Path
@@ -1912,6 +1936,9 @@ class Application:
         """
         if latest_decision(self.db_manager, run_id, "merged_commit"):
             return False
+        if not (worktree_path / ".git").exists():
+            # No longer a git worktree (partially removed); its files can't be verified.
+            return True
         status = await self.executor.run(
             ["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree_path
         )
@@ -1931,6 +1958,18 @@ class Application:
         self.ui.print_success(f"Worktrees removed: {len(report.worktrees_removed)}")
         self.ui.print_success(f"Locks cleared: {len(report.locks_cleared)}")
         self.ui.print_success(f"Log directories cleared: {len(report.logs_cleared)}")
+        self.ui.print_success(f"Temp directories removed: {len(report.temp_removed)}")
+        if report.locked_paths:
+            hint = (
+                "They were created by a sandboxed agent under another account; re-run "
+                "`agentflow cleanup` from an Administrator terminal to remove them."
+                if report.needs_admin
+                else "They could not be removed; delete them manually."
+            )
+            self.ui.print_warning(
+                f"Locked folders left behind: {len(report.locked_paths)}. {hint}\n  "
+                + "\n  ".join(report.locked_paths)
+            )
         if report.skipped_active:
             self.ui.print_info(
                 f"Skipped (still active): {len(report.skipped_active)} -- "

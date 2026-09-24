@@ -75,6 +75,8 @@ class ClaudeAdapter(BaseAgentAdapter):
             # AgentFlow already holds the isolated worktree's writer lock. In
             # non-interactive mode, Claude otherwise denies Edit and Write calls.
             args.extend(["--permission-mode", "acceptEdits"])
+            if request.scratch_directory is not None:
+                args.extend(["--add-dir", str(request.scratch_directory)])
 
         if session_id:
             args.extend(["--resume", session_id])

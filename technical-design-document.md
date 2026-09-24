@@ -1849,6 +1849,16 @@ the worktree is kept for `agentflow merge`. After a successful merge the worktre
 `agentflow/<run-id>` branch are removed. `agentflow cleanup` never removes a completed
 run's worktree that still holds unmerged changes.
 
+Each run also gets a temp directory beside its worktree, `<run-id>.tmp`. Writer agents
+and verification commands receive it as `TMP`/`TEMP`/`TMPDIR`, and Codex/Claude get it
+via `--add-dir` so their sandboxes can write there. Test runners therefore never leave
+temp folders inside the worktree, where files created by a sandbox account can be
+undeletable by the user. `agentflow cleanup` removes, for terminal runs, leftover worktree
+folders, these temp directories, and verification logs. Folders a sandbox left owned by
+another account are taken over (Administrators ownership, only for the specific locked
+folders and only inside AgentFlow-managed directories) when cleanup runs elevated;
+otherwise they are listed with instructions to re-run cleanup as Administrator.
+
 ---
 
 ## Dangerous commands

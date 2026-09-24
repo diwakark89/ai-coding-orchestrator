@@ -9,10 +9,12 @@ from rich.prompt import Prompt
 from agentflow.application import Application
 from agentflow.config.models import GlobalConfig, LoggingConfig, StorageConfig, WorktreesConfig
 from agentflow.errors import MergeError, WorktreeError
-from agentflow.git.worktree import WorktreeHandle, WorktreeManager
+from agentflow.git.worktree import WorktreeHandle, WorktreeManager, scratch_dir_for
 from agentflow.persistence.database import DatabaseManager
+from agentflow.process.removal import RemovalResult
 from agentflow.project.discovery import discover_project
 from agentflow.ui.approval import FinalApprovalDecision, ask_final_approval
+from agentflow.workflow import merge as merge_module
 from agentflow.workflow.merge import commit_subject, latest_decision, merge_run, preflight_merge
 from agentflow.workflow.states import WorkflowState
 
@@ -176,12 +178,37 @@ async def test_failed_worktree_removal_is_a_warning_not_a_failure(
     async def locked_remove(handle: WorktreeHandle, force: bool = True) -> None:
         raise WorktreeError("Directory not empty")
 
+    async def cannot_remove(path: Path, allowed_roots: object, executor: object) -> RemovalResult:
+        return RemovalResult(removed=path != worktree, needs_admin=True)
+
     monkeypatch.setattr(manager, "remove", locked_remove)
+    monkeypatch.setattr(merge_module, "remove_tree", cannot_remove)
     outcome = await _merge(db, manager, git_repo, worktree)
 
     assert outcome.merged
     assert outcome.cleanup_warning is not None
     assert str(worktree) in outcome.cleanup_warning
+    assert "Administrator" in outcome.cleanup_warning
+
+
+@pytest.mark.asyncio
+async def test_merge_clears_leftovers_when_git_worktree_remove_fails(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`git worktree remove` failing (as with locked temp dirs) still ends fully cleaned."""
+    db, manager, worktree = await _setup(git_repo, tmp_path)
+    scratch = scratch_dir_for(worktree)
+    (scratch / "pytest-of-user").mkdir(parents=True)
+
+    async def failing_remove(handle: WorktreeHandle, force: bool = True) -> None:
+        raise WorktreeError("Directory not empty")
+
+    monkeypatch.setattr(manager, "remove", failing_remove)
+    outcome = await _merge(db, manager, git_repo, worktree)
+
+    assert outcome.merged and outcome.cleanup_warning is None
+    assert not worktree.exists() and not scratch.exists()
+    assert not await manager.branch_exists(git_repo, f"agentflow/{RUN_ID}")
 
 
 def test_commit_subject_from_plan_objective_or_task():

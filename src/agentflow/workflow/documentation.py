@@ -14,7 +14,7 @@ from agentflow.agents.base import AgentRequest, AgentRole, describe_agent_failur
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.config.models import DocumentationConfig, VerificationGroup
 from agentflow.git.lock import WorktreeLock
-from agentflow.git.worktree import WorktreeManager
+from agentflow.git.worktree import WorktreeManager, scratch_dir_for
 from agentflow.observability.events import record_agent_completed, record_agent_started
 from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
@@ -154,6 +154,7 @@ class DocumentationWorkflow:
                 ),
                 repository_path=project_context.root_path,
                 working_directory=worktree_path,
+                scratch_directory=scratch_dir_for(worktree_path),
                 model=decision.model,
                 read_only=False,
             )

@@ -13,8 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentflow.errors import WorktreeError
-from agentflow.git.worktree import WorktreeHandle, WorktreeManager
+from agentflow.git.worktree import WorktreeHandle, WorktreeManager, scratch_dir_for
 from agentflow.persistence.database import DatabaseManager
+from agentflow.process.removal import remove_tree
 
 _SUBJECT_LIMIT = 72
 
@@ -156,18 +157,25 @@ async def merge_run(
     db_manager.record_event(run_id=run_id, stage="COMPLETED", event="RUN_MERGED")
 
     branch_name = manager.branch_name_for(run_id)
-    warning: str | None = None
+    git_error = ""
     try:
         await manager.remove(
             WorktreeHandle(worktree_path, branch_name, repository_path), force=True
         )
     except WorktreeError as e:
-        warning = str(e)
+        git_error = str(e)  # only worth reporting if something is actually left behind
+    # The changes are safely committed now, so leftovers and the run's temp dir can go.
+    for leftover in (worktree_path, scratch_dir_for(worktree_path)):
+        await remove_tree(leftover, [manager.worktrees_root], manager.executor)
+    if not worktree_path.exists():
+        await manager.prune(repository_path)
     await manager.delete_branch(repository_path, branch_name)
+    warning: str | None = None
     if worktree_path.exists():
         warning = (
             f"Merged, but the worktree folder could not be fully deleted: {worktree_path}. "
-            "Remove it manually." + (f" ({warning})" if warning else "")
+            "Run `agentflow cleanup` from an Administrator terminal to remove locked "
+            "folders." + (f" ({git_error})" if git_error else "")
         )
     elif await manager.branch_exists(repository_path, branch_name):
         warning = f"Merged, but branch {branch_name!r} could not be deleted."

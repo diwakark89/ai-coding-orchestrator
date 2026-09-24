@@ -12,7 +12,7 @@ from pathlib import Path
 from agentflow.agents.base import AgentRequest, AgentRole, describe_agent_failure
 from agentflow.agents.registry import AgentAdapterRegistry
 from agentflow.git.lock import WorktreeLock
-from agentflow.git.worktree import WorktreeDiff, WorktreeHandle, WorktreeManager
+from agentflow.git.worktree import WorktreeDiff, WorktreeHandle, WorktreeManager, scratch_dir_for
 from agentflow.observability.events import record_agent_completed, record_agent_started
 from agentflow.persistence.database import DatabaseManager
 from agentflow.project.context import ProjectContext
@@ -164,6 +164,7 @@ class ImplementationWorkflow:
             prompt=prompt,
             repository_path=project_context.root_path,
             working_directory=handle.path,
+            scratch_directory=scratch_dir_for(handle.path),
             model=routing_decision.model,
             read_only=False,
         )

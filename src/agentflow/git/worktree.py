@@ -14,6 +14,15 @@ from agentflow.errors import WorktreeError
 from agentflow.process.executor import ProcessExecutor
 
 
+def scratch_dir_for(worktree_path: Path) -> Path:
+    """Per-run temp directory beside (never inside) the worktree, e.g. `<run-id>.tmp`.
+
+    Agents and verification commands get it as TMP/TEMP/TMPDIR so test runners never leave
+    temp folders in the worktree, where a sandboxed agent's files can end up undeletable.
+    """
+    return worktree_path.parent / f"{worktree_path.name}.tmp"
+
+
 @dataclass
 class WorktreeHandle:
     """A created worktree: its filesystem path, branch, and originating repository.
@@ -210,6 +219,10 @@ class WorktreeManager:
         result = await self.executor.run(args, cwd=handle.repository_path)
         if result.exit_code != 0:
             raise WorktreeError(f"Failed to remove worktree {handle.path}: {result.stderr.strip()}")
+
+    async def prune(self, repository_path: Path) -> None:
+        """Forget worktrees whose folders no longer exist, so their branches can be deleted."""
+        await self.executor.run(["git", "worktree", "prune"], cwd=repository_path)
 
     async def delete_branch(self, repository_path: Path, branch_name: str) -> None:
         """Force-delete a run's dedicated branch after its worktree has been removed.

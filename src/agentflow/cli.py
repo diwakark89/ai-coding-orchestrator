@@ -834,9 +834,10 @@ def cleanup_cmd(
         ),
     ] = None,
 ) -> None:
-    """Remove worktrees/logs for completed, blocked, or cancelled runs, and clear stale locks.
+    """Remove worktrees, temp dirs and logs for finished runs, and clear stale locks.
 
-    Never removes a worktree still guarded by a live writer lock, regardless of run status.
+    Never removes a worktree still guarded by a live writer lock, or a completed run's
+    unmerged changes. Run it as Administrator to also remove folders an agent sandbox locked.
     """
     global_project = ctx.obj.get("project") if ctx.obj else None
     target_project = project or global_project

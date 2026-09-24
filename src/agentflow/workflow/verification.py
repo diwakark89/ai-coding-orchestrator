@@ -17,8 +17,10 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agentflow.agents.base import temp_env
 from agentflow.config.models import VerificationGroup
 from agentflow.errors import ConfigurationError, ProcessExecutionError
+from agentflow.git.worktree import scratch_dir_for
 from agentflow.persistence.database import DatabaseManager
 from agentflow.process.executor import ProcessExecutor
 from agentflow.ui.console import ConsoleUI
@@ -151,7 +153,10 @@ AGENT_VERIFICATION_GUIDANCE = (
     "check for the code you changed, such as a single test file or test class.\n"
     "- Do not change test scripts, build or dependency configuration, or environment setup "
     "just to make verification pass. If tests cannot run because of the environment (missing "
-    "modules, tools, or scripts), stop and report that as a blocker."
+    "modules, tools, or scripts), stop and report that as a blocker.\n"
+    "- Never create temporary files or folders inside the worktree. Use the directory in the "
+    "TMPDIR / TEMP environment variable (for pytest, the default temp location is already "
+    "correct; do not pass a --basetemp inside the worktree)."
 )
 
 
@@ -590,7 +595,11 @@ class VerificationRunner:
         try:
             async with self.ui.animate_stage(f"Verifying ({command})"):
                 proc_res = await self.executor.run(
-                    cmd_args=args, cwd=worktree_path, timeout=timeout_seconds
+                    cmd_args=args,
+                    cwd=worktree_path,
+                    timeout=timeout_seconds,
+                    # Test runners' temp files go beside the worktree, never inside it.
+                    env=temp_env(scratch_dir_for(self._worktree)) if self._worktree else None,
                 )
         except ProcessExecutionError as e:
             now = datetime.now(timezone.utc)

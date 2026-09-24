@@ -89,6 +89,9 @@ class AgentRequest(BaseModel):
     model: str
     read_only: bool = False
     timeout_seconds: float | None = None
+    # Where the agent's tools must put temp files (exported as TMP/TEMP/TMPDIR); kept
+    # outside the worktree so sandbox-owned temp folders never land in it.
+    scratch_directory: Path | None = None
 
     # Provider-specific settings live in an extensible structure
     provider_options: dict[str, Any] = Field(default_factory=dict)
@@ -107,7 +110,7 @@ class AgentRequest(BaseModel):
         validate_model_allowed(v)
         return v
 
-    @field_validator("repository_path", "working_directory", mode="before")
+    @field_validator("repository_path", "working_directory", "scratch_directory", mode="before")
     @classmethod
     def _validate_paths(cls, v: Any) -> Any:
         return _expand_path(v)
@@ -291,6 +294,20 @@ class AgentAdapter(Protocol):
         ...
 
 
+def temp_env(scratch_directory: Path) -> dict[str, str]:
+    """Environment pointing every common temp variable at `scratch_directory` (created)."""
+    scratch_directory.mkdir(parents=True, exist_ok=True)
+    value = str(scratch_directory)
+    return {"TMP": value, "TEMP": value, "TMPDIR": value}
+
+
+def _scratch_env_kwargs(request: AgentRequest) -> dict[str, Any]:
+    # Only pass `env` when there is one, keeping the executor call unchanged otherwise.
+    if request.scratch_directory is None:
+        return {}
+    return {"env": temp_env(request.scratch_directory)}
+
+
 class BaseAgentAdapter(ABC):
     """Base class for provider CLI adapters providing execution scaffolding."""
 
@@ -339,6 +356,7 @@ class BaseAgentAdapter(ABC):
             cmd_args=cmd_args,
             cwd=cwd,
             timeout=request.timeout_seconds,
+            **_scratch_env_kwargs(request),
         )
         return self.parse_result(proc_res, request, session_id=None)
 
@@ -359,5 +377,6 @@ class BaseAgentAdapter(ABC):
             cmd_args=cmd_args,
             cwd=cwd,
             timeout=request.timeout_seconds,
+            **_scratch_env_kwargs(request),
         )
         return self.parse_result(proc_res, request, session_id=session_id)

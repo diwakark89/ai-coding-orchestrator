@@ -1029,3 +1029,58 @@ def test_doctor_check_cli_version_failure(monkeypatch):
     assert item.critical is False
     assert item.is_warning is True
     assert "failed '--version' check" in item.details
+
+
+def test_writer_requests_give_sandbox_the_scratch_dir(tmp_path: Path):
+    """Codex/Claude writers may write the run's temp dir; read-only Claude gets no extra dir."""
+    scratch = tmp_path / "RUN-1.tmp"
+    codex_req = AgentRequest(
+        role=AgentRole.STANDARD_CODER,
+        prompt="Implement",
+        repository_path=tmp_path,
+        model="GPT-6 Sol",
+        scratch_directory=scratch,
+    )
+    codex_args = CodexAdapter(command="codex", config_home=tmp_path).build_args(codex_req)
+    assert codex_args[codex_args.index("--add-dir") + 1] == str(scratch)
+
+    claude = ClaudeAdapter(command="claude")
+    writer = codex_req.model_copy(update={"model": "Claude Sonnet 5"})
+    assert "--add-dir" in claude.build_args(writer)
+    reader = writer.model_copy(update={"read_only": True})
+    assert "--add-dir" not in claude.build_args(reader)
+
+
+@pytest.mark.asyncio
+async def test_agent_process_gets_temp_env_pointing_at_scratch_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    seen: dict[str, object] = {}
+
+    async def mock_run(cmd_args, cwd=None, timeout=None, env=None):
+        seen["env"] = env
+        now = datetime.now(timezone.utc)
+        return ProcessResult(
+            command=list(cmd_args),
+            exit_code=0,
+            stdout='{"result": "ok"}',
+            stderr="",
+            started_at=now,
+            completed_at=now,
+        )
+
+    executor = ProcessExecutor()
+    monkeypatch.setattr(executor, "run", mock_run)
+    scratch = tmp_path / "RUN-1.tmp"
+    request = AgentRequest(
+        role=AgentRole.STANDARD_CODER,
+        prompt="Implement",
+        repository_path=tmp_path,
+        model="Claude Sonnet 5",
+        scratch_directory=scratch,
+    )
+
+    await ClaudeAdapter(executor=executor).start(request)
+
+    assert seen["env"] == {"TMP": str(scratch), "TEMP": str(scratch), "TMPDIR": str(scratch)}
+    assert scratch.is_dir()

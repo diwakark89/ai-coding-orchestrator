@@ -266,9 +266,12 @@ async def test_pytest_uses_original_component_venv_for_worktree(
     db.create_run(run_id="run_1", project_id="proj_1", task="Do a thing")
     calls = []
 
-    async def fake_run(cmd_args, cwd, timeout=None):
+    temp_dirs: list[str | None] = []
+
+    async def fake_run(cmd_args, cwd, timeout=None, env=None):
         if cmd_args[0] != "git":
             calls.append((cmd_args, cwd))
+            temp_dirs.append((env or {}).get("TMP"))
         now = datetime.now(timezone.utc)
         return ProcessResult(
             command=list(cmd_args),
@@ -293,6 +296,8 @@ async def test_pytest_uses_original_component_venv_for_worktree(
 
     assert result.status == VerificationStatus.PASSED
     assert calls == [([str(interpreter), "-m", "pytest", "-q"], worktree_component)]
+    # Test temp files go to the run's temp dir beside the worktree, never inside it.
+    assert temp_dirs == [str(worktree.resolve().parent / "worktree.tmp")]
 
 
 @pytest.mark.asyncio
@@ -340,7 +345,7 @@ async def test_pytest_unusable_component_interpreter_reports_error(
     db.create_run(run_id="run_1", project_id="proj_1", task="Do a thing")
     runner = VerificationRunner(db)
 
-    async def fail_run(cmd_args, cwd, timeout=None):
+    async def fail_run(cmd_args, cwd, timeout=None, env=None):
         raise ProcessExecutionError("invalid executable")
 
     monkeypatch.setattr(runner.executor, "run", fail_run)

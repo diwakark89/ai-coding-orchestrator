@@ -783,3 +783,64 @@ async def test_resume_blocked_run_honors_role_override_for_recovered_stage(
     assert claude.calls == 2  # planning, then the overridden re-implementation
     assert codex.calls == 0  # never routed to -- override replaced it entirely
     assert gemini.calls == 1
+
+
+def _completed_run(app_instance: Application, git_repo: Path, run_id: str) -> Path:
+    app_instance.initialize()
+    ctx = discover_project(explicit_path=git_repo)
+    app_instance.db_manager.upsert_project(ctx.project_id, ctx.project_name, str(git_repo))
+    app_instance.db_manager.create_run(run_id, ctx.project_id, "Add a feature")
+    app_instance.db_manager.update_run_state(run_id, WorkflowState.COMPLETED.value, "test setup")
+    return app_instance.config.worktrees.root / ctx.project_name / run_id
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_leftover_worktree_folder_temp_dir_and_logs(
+    git_repo: Path, tmp_path: Path
+):
+    """A merged run whose `git worktree remove` left files behind is cleaned up completely."""
+    _prepare_repo(git_repo)
+    registry, *_ = make_registry()
+    app_instance = make_app(registry, tmp_path)
+    worktree = _completed_run(app_instance, git_repo, "RUN-LEFTOVER")
+    app_instance.db_manager.record_decision("d-merged", "RUN-LEFTOVER", "merged_commit", "abc")
+    # Residue: no longer a git worktree (no .git file), but files remain.
+    (worktree / "ai-engine" / ".pytest-repair-temp").mkdir(parents=True)
+    (worktree / "README.md").write_text("stale copy\n", encoding="utf-8")
+    scratch = worktree.parent / "RUN-LEFTOVER.tmp"
+    (scratch / "pytest-of-user").mkdir(parents=True)
+    logs = git_repo / ".ai-orchestrator" / "runs" / "RUN-LEFTOVER" / "verification"
+    (logs / "tmp-ai-engine").mkdir(parents=True)
+
+    report = await app_instance.run_cleanup(project_path=git_repo)
+
+    assert report.worktrees_removed == ["RUN-LEFTOVER"]
+    assert report.temp_removed == ["RUN-LEFTOVER"]
+    assert report.logs_cleared == ["RUN-LEFTOVER"]
+    assert report.locked_paths == []
+    assert not worktree.exists() and not scratch.exists() and not logs.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_reports_locked_folders_that_need_administrator(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import agentflow.application as application_module
+    from agentflow.process.removal import RemovalResult
+
+    _prepare_repo(git_repo)
+    registry, *_ = make_registry()
+    app_instance = make_app(registry, tmp_path)
+    worktree = _completed_run(app_instance, git_repo, "RUN-LOCKED")
+    scratch = worktree.parent / "RUN-LOCKED.tmp"
+    scratch.mkdir(parents=True)
+
+    async def locked(path, allowed_roots, executor):
+        return RemovalResult(removed=False, needs_admin=True, error="1 locked item(s)")
+
+    monkeypatch.setattr(application_module, "remove_tree", locked)
+    report = await app_instance.run_cleanup(project_path=git_repo)
+
+    assert report.locked_paths == [str(scratch)]
+    assert report.needs_admin
+    assert report.temp_removed == []

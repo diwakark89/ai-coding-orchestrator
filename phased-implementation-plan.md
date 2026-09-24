@@ -2034,11 +2034,13 @@ agentflow cleanup
 
 May remove:
 
-- completed stale worktrees;
+- completed stale worktrees (never a completed run with unmerged changes);
+- leftover worktree folders and per-run `<run-id>.tmp` temp directories;
 - stale logs;
 - stale lock files;
 
-only after verifying they are safe to remove.
+only after verifying they are safe to remove. Folders locked by an agent sandbox are
+removed when cleanup runs as Administrator; otherwise they are reported.
 
 ---
 
